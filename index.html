@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Health Advisor</title>
+<meta name="theme-color" content="#3A66A0">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="app.css?v=1">
+<!-- iOS add-to-home-screen -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Health Advisor">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+</head>
+<body>
+<div class="stack" id="app" aria-live="polite">
+  <div class="appbar">
+    <div style="flex:1">
+      <div class="t">Health Advisor</div>
+      <div class="sub" id="appbar-sub">Loading…</div>
+    </div>
+    <span class="qbadge" id="queue-badge" hidden>0 queued</span>
+  </div>
+  <main id="screen"></main>
+</div>
+<script src="app.js?v=1"></script>
+</body>
+</html>

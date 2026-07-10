@@ -1,0 +1,85 @@
+/* Health Advisor logging UI — shared tokens + component styles (light theme = spec truth).
+   Source of truth for the approved mock-up:
+   https://claude.ai/code/artifact/7450bc71-3780-48d2-8c99-59de1a71630f */
+:root{
+  --ink:#1C2530; --ink-soft:#5A6878; --line:#D4DAE2;
+  --accent:#3A66A0; --accent-ink:#FFFFFF; --accent-soft:#E3EBF5;
+  --good:#2E7D4F; --good-soft:#E2F0E7; --core:#B9812B; --core-soft:#F6EDDC;
+  --phone-bg:#F2F4F7; --card:#FFFFFF; --card-line:#E2E6EC;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--phone-bg);color:var(--ink);
+  font:15px/1.45 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;padding:12px}
+.appbar{background:var(--accent);color:var(--accent-ink);padding:.8rem 1rem;
+  display:flex;align-items:center;gap:.7rem;border-radius:10px 10px 0 0}
+.appbar .t{font-weight:600;font-size:1.02rem}
+.appbar .sub{font-size:.72rem;opacity:.85}
+.sessioncard{background:var(--card);border:1px solid var(--card-line);border-radius:12px;padding:.85rem 1rem}
+.sessioncard .day{font-weight:700;font-size:1.15rem}
+.sessioncard .meta{color:var(--ink-soft);font-size:.8rem;margin-top:.15rem}
+.rot{display:flex;gap:.35rem;margin-top:.6rem;align-items:center}
+.rot span{flex:1;height:4px;border-radius:2px;background:var(--line)}
+.rot span.on{background:var(--accent)}
+.rot em{font-style:normal;font-size:.68rem;color:var(--ink-soft);white-space:nowrap;margin-left:.4rem}
+.ex{background:var(--card);border:1px solid var(--card-line);border-radius:12px;
+  padding:.75rem .9rem;display:flex;flex-direction:column;gap:.45rem}
+.ex .row1{display:flex;align-items:baseline;gap:.5rem}
+.ex .name{font-weight:600;flex:1}
+.ex .rx{font-variant-numeric:tabular-nums;color:var(--ink-soft);font-size:.85rem;white-space:nowrap}
+.badge{font:600 .62rem/1 system-ui;letter-spacing:.06em;text-transform:uppercase;
+  padding:.22rem .45rem;border-radius:5px;background:var(--core-soft);color:var(--core)}
+.badge.done{background:var(--good-soft);color:var(--good)}
+.ghost{font-size:.76rem;color:var(--ink-soft)}
+.ghost b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.sets{display:flex;gap:.4rem;flex-wrap:wrap}
+.setchip{border:1.5px solid var(--line);background:transparent;color:var(--ink);border-radius:9px;
+  padding:.35rem .6rem;font:600 .85rem/1 system-ui;font-variant-numeric:tabular-nums;min-width:52px;text-align:center}
+.setchip small{display:block;font:500 .58rem/1.4 system-ui;color:var(--ink-soft);letter-spacing:.04em}
+.setchip.filled{border-color:var(--good);background:var(--good-soft);color:var(--good)}
+.setchip.filled small{color:var(--good)}
+.exfoot{display:flex;justify-content:space-between;align-items:center;font-size:.76rem;color:var(--ink-soft)}
+.linkbtn{background:none;border:none;color:var(--accent);font:600 .76rem system-ui;padding:.2rem .1rem}
+.ex.skipped{opacity:.55}
+.ex.skipped .name{text-decoration:line-through}
+.fabbtn{background:var(--accent);color:var(--accent-ink);border:none;border-radius:14px;
+  padding:.95rem;font:600 1rem system-ui;width:100%;box-shadow:0 8px 20px rgba(20,50,90,.35)}
+.formcard{background:var(--card);border:1px solid var(--card-line);border-radius:12px;
+  padding:.9rem 1rem;display:flex;flex-direction:column;gap:.8rem}
+.label{font:600 .68rem/1 system-ui;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft)}
+.rxline{display:flex;justify-content:space-between;font-variant-numeric:tabular-nums;font-size:.95rem}
+.rxline b{font-weight:700}
+.lastline{font-size:.8rem;color:var(--ink-soft)}
+.lastline b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.setrow{display:flex;align-items:center;gap:.6rem}
+.setrow .sn{font:600 .78rem system-ui;color:var(--ink-soft);width:3.2rem}
+.stepper{display:flex;align-items:center;border:1.5px solid var(--line);border-radius:10px;overflow:hidden}
+.stepper button{background:none;border:none;width:38px;height:38px;font:600 1.15rem system-ui;color:var(--accent)}
+.stepper output{width:44px;text-align:center;font:600 1rem system-ui;font-variant-numeric:tabular-nums}
+.setrow .u{font-size:.74rem;color:var(--ink-soft)}
+textarea.cmt{width:100%;border:1.5px solid var(--line);border-radius:10px;background:transparent;
+  color:var(--ink);font:.9rem/1.45 system-ui;padding:.6rem .7rem;resize:none}
+.formbtns{display:flex;gap:.6rem}
+.formbtns .primary{flex:1;background:var(--accent);color:var(--accent-ink);border:none;
+  border-radius:12px;padding:.85rem;font:600 .95rem system-ui}
+.formbtns .ghostbtn{background:none;border:1.5px solid var(--line);border-radius:12px;
+  padding:.85rem 1rem;font:600 .95rem system-ui;color:var(--ink-soft)}
+.stack{display:flex;flex-direction:column;gap:.65rem;max-width:400px;margin:0 auto}
+.speclabel{font:600 .66rem/1 system-ui;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-soft);margin:.9rem 0 .35rem}
+
+/* ---- PWA shell additions (not in the design-card shared sheet) ------------- */
+html{height:100%}
+body{min-height:100%;padding:max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left))}
+.qbadge{font:600 .68rem/1 system-ui;letter-spacing:.04em;background:rgba(255,255,255,.18);
+  color:var(--accent-ink);border:1px solid rgba(255,255,255,.4);border-radius:999px;padding:.3rem .55rem;white-space:nowrap}
+.stale{font:600 .62rem/1 system-ui;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--core);background:var(--core-soft);border-radius:5px;padding:.22rem .45rem}
+main{display:flex;flex-direction:column;gap:.65rem}
+.field{display:flex;flex-direction:column;gap:.3rem}
+.field input{border:1.5px solid var(--line);border-radius:10px;background:transparent;color:var(--ink);
+  font:.9rem/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;padding:.6rem .7rem;width:100%}
+.field input:focus{outline:none;border-color:var(--accent)}
+.err{color:#B3261E;background:#F9DEDC;border-radius:10px;padding:.6rem .8rem;font-size:.85rem}
+.hint{font-size:.78rem;color:var(--ink-soft)}
+.center{ text-align:center;color:var(--ink-soft);padding:1.2rem 0}
+button:active{transform:translateY(1px)}
