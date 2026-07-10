@@ -90,3 +90,9 @@ button.setchip{cursor:pointer}
   background:var(--ink);color:#fff;border-radius:10px;padding:.6rem .9rem;font:.85rem system-ui;
   transition:transform .2s;max-width:90vw;z-index:9}
 .toastbar.on{transform:translateX(-50%) translateY(0)}
+.sheetwrap{position:fixed;inset:0;background:rgba(20,30,45,.4);z-index:5;display:flex;align-items:flex-end}
+.sheet{width:100%;max-width:400px;margin:0 auto;background:var(--phone-bg);border-radius:16px 16px 0 0;
+  padding:12px 12px max(12px, env(safe-area-inset-bottom));max-height:88vh;overflow-y:auto;
+  display:flex;flex-direction:column;gap:.65rem;box-shadow:0 -10px 30px rgba(20,30,45,.25)}
+.setrow input[type=text]{border:1.5px solid var(--line);border-radius:10px;background:transparent;
+  color:var(--ink);font:600 1rem ui-monospace,Menlo,monospace;padding:.45rem .6rem;width:110px;text-align:center}
