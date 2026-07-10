@@ -83,3 +83,10 @@ main{display:flex;flex-direction:column;gap:.65rem}
 .hint{font-size:.78rem;color:var(--ink-soft)}
 .center{ text-align:center;color:var(--ink-soft);padding:1.2rem 0}
 button:active{transform:translateY(1px)}
+.setchip.low{border-color:var(--core);color:var(--core)}
+.setchip.low small{color:var(--core)}
+button.setchip{cursor:pointer}
+.toastbar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%) translateY(80px);
+  background:var(--ink);color:#fff;border-radius:10px;padding:.6rem .9rem;font:.85rem system-ui;
+  transition:transform .2s;max-width:90vw;z-index:9}
+.toastbar.on{transform:translateX(-50%) translateY(0)}

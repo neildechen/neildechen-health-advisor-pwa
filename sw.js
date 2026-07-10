@@ -3,12 +3,12 @@
  * script.google.com (cross-origin) and are deliberately not intercepted. */
 'use strict';
 
-const CACHE = 'ha-shell-v1';
+const CACHE = 'ha-shell-v2';
 const SHELL = [
   './',
   'index.html',
-  'app.css?v=1',
-  'app.js?v=1',
+  'app.css?v=2',
+  'app.js?v=2',
   'manifest.webmanifest',
   'icons/icon-192.png',
   'icons/icon-512.png',
