@@ -23,25 +23,42 @@ const cfg = {
 
 // ---- API ---------------------------------------------------------------------
 
+/** fetch with a hard timeout — a hung request must fail like a network error so
+ *  writes fall into the offline queue instead of leaving the UI stuck. */
+function timedFetch(url, opts, ms) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  return fetch(url, Object.assign({}, opts, { signal: ctl.signal }))
+    .then((res) => {
+      if (!res.ok) throw new TypeError('HTTP ' + res.status); // 5xx et al. = transient
+      return res;
+    })
+    .catch((e) => {
+      if (e.name === 'AbortError') throw new TypeError('timeout');
+      throw e;
+    })
+    .finally(() => clearTimeout(timer));
+}
+
 const api = {
   async get(view, extra) {
     const u = new URL(cfg.execUrl);
     u.searchParams.set('token', cfg.token);
     u.searchParams.set('view', view);
     if (extra) Object.entries(extra).forEach(([k, v]) => u.searchParams.set(k, String(v)));
-    const res = await fetch(u.toString(), { redirect: 'follow' });
+    const res = await timedFetch(u.toString(), { redirect: 'follow' }, 15000);
     return res.json(); // reads always come back JSON; a throw here is a network problem
   },
   /** POST with text/plain (application/json would trigger a preflight Apps Script
    *  cannot answer). Any non-JSON response (large-POST HTML quirk) throws
    *  {nonJson:true}: the write may have landed — verify by GET, never retry blind. */
   async post(body) {
-    const res = await fetch(cfg.execUrl, {
+    const res = await timedFetch(cfg.execUrl, {
       method: 'POST',
       redirect: 'follow',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(Object.assign({ token: cfg.token }, body)),
-    });
+    }, 25000);
     const text = await res.text();
     try { return JSON.parse(text); }
     catch (_) { const e = new Error('non-JSON response'); e.nonJson = true; throw e; }
@@ -54,7 +71,11 @@ const api = {
 
 const queue = {
   read() { try { return JSON.parse(localStorage.getItem(LS.queue)) || []; } catch (_) { return []; } },
-  write(q) { localStorage.setItem(LS.queue, JSON.stringify(q)); updateBadge(); },
+  write(q) {
+    try { localStorage.setItem(LS.queue, JSON.stringify(q)); }
+    catch (_) { toast('Storage full — queued writes may not survive a reload.'); }
+    updateBadge();
+  },
   push(body) { const q = this.read(); q.push({ body, ts: Date.now() }); this.write(q); },
   get length() { return this.read().length; },
 };
@@ -73,7 +94,15 @@ function isNetworkError(e) { return e instanceof TypeError || /fetch|network/i.t
  *  (ok:false) are real errors and are NOT queued. */
 async function write(body) {
   try {
-    return await api.post(body);
+    const r = await api.post(body);
+    // The script lock rejects writes while a completion is running ("busy — another
+    // write is running"). That's transient, not a user error: queue and move on.
+    if (r && r.ok === false && /busy/i.test(r.error || '')) {
+      queue.push(body);
+      toast('Server busy — queued, will retry.');
+      return { ok: true, queued: true };
+    }
+    return r;
   } catch (e) {
     if (e.nonJson) throw e;           // landed-but-HTML: caller verifies by GET
     if (!isNetworkError(e)) throw e;
@@ -93,7 +122,10 @@ async function flushQueue() {
   try {
     while (q.length) {
       try {
-        await api.post(q[0].body);      // nonJson counts as landed (verify by GET after)
+        const r = await api.post(q[0].body); // nonJson counts as landed (verify by GET after)
+        if (r && r.ok === false && /busy/i.test(r.error || '')) break; // transient — retry later
+        // Any other API rejection is permanent (e.g. set_id from a superseded
+        // session): drop it rather than wedging the queue forever.
         q.shift(); landed++;
         queue.write(q);
       } catch (e) {
@@ -380,10 +412,11 @@ async function skipExercise(exName) {
 
 let noteTimer;
 function saveNotes(text) {
+  const sessionId = state.open.session.session_id; // capture NOW — session may roll over mid-debounce
   clearTimeout(noteTimer);
   noteTimer = setTimeout(async () => {
     try {
-      const r = await write({ action: 'session_note', session_id: state.open.session.session_id, text });
+      const r = await write({ action: 'session_note', session_id: sessionId, text });
       if (!r.ok) throw new Error(r.error);
       state.open.session.session_notes = text;
       if (!r.queued) toast('Notes saved.');
@@ -513,7 +546,8 @@ async function refresh() {
   if (!r.ok) throw new Error(r.error || 'API error');
   state.open = r.open;
   state.stale = false;
-  localStorage.setItem(LS.lastGood, JSON.stringify({ open: r.open, ts: Date.now() }));
+  try { localStorage.setItem(LS.lastGood, JSON.stringify({ open: r.open, ts: Date.now() })); }
+  catch (_) { /* private mode / quota: offline fallback just won't have data */ }
   renderToday();
 }
 
