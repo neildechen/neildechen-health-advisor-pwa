@@ -48,6 +48,70 @@ const api = {
   },
 };
 
+// ---- offline queue ---------------------------------------------------------------
+// Failed WRITES (network-level, not API rejections) append here and flush FIFO on
+// connectivity/visibility events. Reads render last-known-good with a stale marker.
+
+const queue = {
+  read() { try { return JSON.parse(localStorage.getItem(LS.queue)) || []; } catch (_) { return []; } },
+  write(q) { localStorage.setItem(LS.queue, JSON.stringify(q)); updateBadge(); },
+  push(body) { const q = this.read(); q.push({ body, ts: Date.now() }); this.write(q); },
+  get length() { return this.read().length; },
+};
+
+function updateBadge() {
+  const b = document.getElementById('queue-badge');
+  const n = queue.length;
+  b.hidden = n === 0;
+  b.textContent = n + ' queued';
+}
+
+function isNetworkError(e) { return e instanceof TypeError || /fetch|network/i.test(e.message || ''); }
+
+/** Write with offline fallback. Returns {queued:true} when the write was stored
+ *  for later flush — callers apply the change optimistically. API rejections
+ *  (ok:false) are real errors and are NOT queued. */
+async function write(body) {
+  try {
+    return await api.post(body);
+  } catch (e) {
+    if (e.nonJson) throw e;           // landed-but-HTML: caller verifies by GET
+    if (!isNetworkError(e)) throw e;
+    queue.push(body);
+    toast('Saved offline — will sync (' + queue.length + ' queued).');
+    return { ok: true, queued: true };
+  }
+}
+
+let flushing = false;
+async function flushQueue() {
+  if (flushing) return;
+  const q = queue.read();
+  if (!q.length) return;
+  flushing = true;
+  let landed = 0;
+  try {
+    while (q.length) {
+      try {
+        await api.post(q[0].body);      // nonJson counts as landed (verify by GET after)
+        q.shift(); landed++;
+        queue.write(q);
+      } catch (e) {
+        if (e.nonJson) { q.shift(); landed++; queue.write(q); continue; }
+        break;                          // still offline — keep FIFO order, retry later
+      }
+    }
+  } finally {
+    flushing = false;
+  }
+  if (landed) {
+    toast('Synced ' + landed + ' queued write' + (landed > 1 ? 's' : '') + '.');
+    try { await refresh(); } catch (_) { /* offline again */ }
+  }
+}
+window.addEventListener('online', flushQueue);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) flushQueue(); });
+
 // ---- tiny DOM helpers ----------------------------------------------------------
 
 const $ = (sel) => document.querySelector(sel);
@@ -149,7 +213,8 @@ function sessionHeader(o) {
   const dots = (r.order || []).map((_, i) =>
     el('span', { class: i < (r.position || 0) ? 'on' : '' }));
   return el('div', { class: 'sessioncard' },
-    el('div', { class: 'day' }, s.day_label),
+    el('div', { class: 'day' }, s.day_label,
+      state.stale ? el('span', { class: 'stale', style: 'margin-left:.5rem;vertical-align:middle' }, 'offline · stale') : null),
     el('div', { class: 'meta' },
       fmtDate(s.date) + (r.last_session_date ? ' · last session ' + daysAgoText(r.last_session_date) : '')),
     el('div', { class: 'rot' }, dots,
@@ -170,9 +235,10 @@ async function tapChip(set, chipBtn, exName) {
   chipBtn.dataset.busy = '1';
   chipBtn.firstChild.textContent = '…';
   try {
-    const r = await api.post({ action: 'log_set', set_id: set.set_id, actual_reps: reps });
+    const r = await write({ action: 'log_set', set_id: set.set_id, actual_reps: reps });
     if (!r.ok) throw new Error(r.error);
-    Object.assign(set, r.row);
+    if (r.queued) set.actual_reps = String(reps);
+    else Object.assign(set, r.row);
     renderToday();
   } catch (e) {
     if (e.nonJson) { await refresh(); return; } // write may have landed — verify by GET
@@ -222,9 +288,14 @@ function openEditor(set, exName) {
     sheetBusy(true);
     try {
       const body = Object.assign({ action: 'log_set', set_id: set.set_id }, fields);
-      const r = await api.post(body);
+      const r = await write(body);
       if (!r.ok) throw new Error(r.error);
-      Object.assign(set, r.row);
+      if (r.queued) {
+        if (fields.actual_reps != null) set.actual_reps = String(fields.actual_reps);
+        if (fields.actual_load != null) set.actual_load = fields.actual_load;
+        if (fields.comment != null) set.comment = fields.comment;
+        if (fields.skipped != null) set.skipped = fields.skipped ? 'TRUE' : 'FALSE';
+      } else Object.assign(set, r.row);
       closeSheet();
       renderToday();
       // auto-advance: next unlogged, unskipped set of this exercise
@@ -293,9 +364,14 @@ function sheetBusy(b) {
 
 async function skipExercise(exName) {
   try {
-    const r = await api.post({ action: 'skip_exercise', session_id: state.open.session.session_id, exercise: exName });
+    const r = await write({ action: 'skip_exercise', session_id: state.open.session.session_id, exercise: exName });
     if (!r.ok) throw new Error(r.error);
-    await refresh();
+    if (r.queued) {
+      state.open.sets.forEach((s) => {
+        if (s.exercise === exName && s.actual_reps === '') { s.skipped = 'TRUE'; if (!s.comment) s.comment = 'skipped for time'; }
+      });
+      renderToday();
+    } else await refresh();
   } catch (e) {
     if (e.nonJson) { await refresh(); return; }
     toast('Skip failed: ' + e.message);
@@ -307,10 +383,10 @@ function saveNotes(text) {
   clearTimeout(noteTimer);
   noteTimer = setTimeout(async () => {
     try {
-      const r = await api.post({ action: 'session_note', session_id: state.open.session.session_id, text });
+      const r = await write({ action: 'session_note', session_id: state.open.session.session_id, text });
       if (!r.ok) throw new Error(r.error);
       state.open.session.session_notes = text;
-      toast('Notes saved.');
+      if (!r.queued) toast('Notes saved.');
     } catch (e) {
       if (e.nonJson) { await refresh(); return; }
       toast('Notes failed: ' + e.message);
@@ -327,9 +403,10 @@ async function completeSession(btn) {
   btn.disabled = true; btn.textContent = 'Finishing…';
   setSub('Finishing…');
   try {
-    const r = await api.post(Object.assign({ action: 'complete_v2' }, logged ? {} : { allowEmpty: true }));
+    const r = await write(Object.assign({ action: 'complete_v2' }, logged ? {} : { allowEmpty: true }));
     if (!r.ok && r.reason === 'empty') { toast(r.message); btn.disabled = false; btn.textContent = 'Complete Session ✓'; return; }
     if (!r.ok) throw new Error(r.error || 'complete failed');
+    if (r.queued) { toast('Completion queued — will finish when back online.'); setSub('Offline'); return; }
   } catch (e) {
     if (!e.nonJson) {
       toast('Complete failed: ' + e.message);
@@ -435,6 +512,8 @@ async function refresh() {
   const r = await api.get('open');
   if (!r.ok) throw new Error(r.error || 'API error');
   state.open = r.open;
+  state.stale = false;
+  localStorage.setItem(LS.lastGood, JSON.stringify({ open: r.open, ts: Date.now() }));
   renderToday();
 }
 
@@ -442,12 +521,24 @@ async function refresh() {
 
 async function boot() {
   if (!cfg.ready) { renderSetup(); return; }
+  updateBadge();
   setSub('Syncing…');
   show(el('div', { class: 'center' }, 'Loading session…'));
   try {
     await refresh();
+    flushQueue();
   } catch (e) {
     if (/bad token/.test(e.message)) { renderSetup('The API said: bad token.'); return; }
+    // offline: render last-known-good with a stale marker
+    let last = null;
+    try { last = JSON.parse(localStorage.getItem(LS.lastGood)); } catch (_) { /* none */ }
+    if (last && last.open) {
+      state.open = last.open;
+      state.stale = last.ts;
+      setSub('Offline');
+      renderToday();
+      return;
+    }
     setSub('Offline');
     show(el('div', { class: 'err' }, 'Could not reach the API: ' + e.message));
   }
