@@ -96,3 +96,9 @@ button.setchip{cursor:pointer}
   display:flex;flex-direction:column;gap:.65rem;box-shadow:0 -10px 30px rgba(20,30,45,.25)}
 .setrow input[type=text]{border:1.5px solid var(--line);border-radius:10px;background:transparent;
   color:var(--ink);font:600 1rem ui-monospace,Menlo,monospace;padding:.45rem .6rem;width:110px;text-align:center}
+.fabbtn:disabled{opacity:.5;box-shadow:none;transform:none}
+.undoline{font-size:.76rem;color:var(--ink-soft);margin-top:.55rem;padding-top:.55rem;border-top:1px solid var(--card-line)}
+.toastbar{display:flex;align-items:center;gap:.9rem;width:max-content}
+.toastbar .tact{background:none;border:none;color:var(--accent-soft);font:700 .78rem system-ui;
+  letter-spacing:.06em;text-transform:uppercase;padding:.2rem 0;white-space:nowrap}
+.formbtns .primary.danger{background:#B3261E}
