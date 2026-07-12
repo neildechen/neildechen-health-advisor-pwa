@@ -1,4 +1,10 @@
-/* Health Advisor logging PWA — P4: submit guard + undo_complete recovery.
+/* Health Advisor logging PWA — P5: optimistic writes (Instagram model).
+ * Set-level writes render as committed the moment they're tapped; the POST
+ * reconciles in the background. Transient failures keep the optimistic state
+ * (offline queue, as before); hard API rejections revert exactly the touched
+ * fields and say so. Complete/Undo stay deliberately pessimistic — they are
+ * state-machine transitions, and Complete first settles every pending write
+ * so the server never snapshots a half-landed session.
  * Spec: gym-programmer docs/pwa-build-spec.md. Design truth: designs/ cards.
  *
  * Security model: EXEC_URL and TOKEN live in localStorage ONLY — entered on the
@@ -127,10 +133,11 @@ async function flushQueue() {
         if (r && r.ok === false && /busy/i.test(r.error || '')) break; // transient — retry later
         // Any other API rejection is permanent (e.g. set_id from a superseded
         // session): drop it rather than wedging the queue forever.
+        clearOptimisticFor(q[0].body);
         q.shift(); landed++;
         queue.write(q);
       } catch (e) {
-        if (e.nonJson) { q.shift(); landed++; queue.write(q); continue; }
+        if (e.nonJson) { clearOptimisticFor(q[0].body); q.shift(); landed++; queue.write(q); continue; }
         break;                          // still offline — keep FIFO order, retry later
       }
     }
@@ -142,8 +149,89 @@ async function flushQueue() {
     try { await refresh(); } catch (_) { /* offline again */ }
   }
 }
+/** A queued write that finally lands stops being "pending" — release its overlay
+ *  entries so the follow-up refresh's server truth stands on its own. */
+function clearOptimisticFor(body) {
+  if (body.set_id) optimistic.clear(body.set_id);
+  else if (body.action === 'skip_exercise' && state.open && state.open.sets) {
+    state.open.sets.forEach((s) => { if (s.exercise === body.exercise) optimistic.clear(s.set_id); });
+  }
+}
+
 window.addEventListener('online', flushQueue);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) flushQueue(); });
+
+// ---- optimistic writes ------------------------------------------------------------
+// The UI is the instant truth; the sheet catches up. Every set-level mutation is
+// applied to state immediately and tracked here until the server acks it, so a
+// concurrent refresh() can't clobber a pending write with a stale snapshot, and
+// Complete can wait for the sheet to actually hold what the screen shows.
+
+const optimistic = {
+  mut: new Map(),      // set_id -> locally-applied fields not yet acked (or queued)
+  inflight: new Set(), // unresolved reconcile promises
+  snapshot(set) {
+    return { actual_reps: set.actual_reps, actual_load: set.actual_load,
+      comment: set.comment, skipped: set.skipped };
+  },
+  apply(setId, fields) {
+    this.mut.set(setId, Object.assign(this.mut.get(setId) || {}, fields));
+  },
+  clear(setId) { this.mut.delete(setId); },
+  /** After refresh(): pending local truth wins over the fetched snapshot. Entries
+   *  whose set_id no longer exists (session rolled over) are dropped. */
+  reapply(open) {
+    if (!open || !open.sets) return;
+    this.mut.forEach((fields, id) => {
+      const s = open.sets.find((r) => r.set_id === id);
+      if (s) Object.assign(s, fields); else this.mut.delete(id);
+    });
+  },
+  /** Resolve when nothing is in flight (Complete gates on this — the server must
+   *  hold every logged set before it snapshots the session). */
+  async settle() {
+    while (this.inflight.size) await Promise.allSettled([...this.inflight]);
+  },
+};
+
+function findSet(setId) {
+  return state.open && state.open.sets
+    ? state.open.sets.find((r) => r.set_id === setId) : null;
+}
+
+/** Background reconcile of one optimistic write. targets = [{set_id, was}], with
+ *  `was` the pre-mutation snapshot for revert. Outcomes: ack -> merge canonical
+ *  row, clear pending; queued (offline/busy) -> optimistic state stands, the
+ *  flush->refresh path finishes the job; non-JSON -> probably landed, verify by
+ *  GET; hard rejection -> revert the touched fields and tell the user. */
+function reconcile(body, targets) {
+  const p = (async () => {
+    try {
+      const r = await write(body);
+      if (r && r.ok === false) throw new Error(r.error || 'rejected');
+      if (r && r.queued) return; // overlay stands until the queue flushes
+      targets.forEach((t) => optimistic.clear(t.set_id));
+      if (r && r.row) { const s = findSet(r.row.set_id); if (s) Object.assign(s, r.row); }
+      renderToday();
+    } catch (e) {
+      if (e.nonJson) { // write may have landed — the sheet is the tiebreaker
+        targets.forEach((t) => optimistic.clear(t.set_id));
+        try { await refresh(); } catch (_) { /* offline right after */ }
+        return;
+      }
+      targets.forEach((t) => {
+        optimistic.clear(t.set_id);
+        const s = findSet(t.set_id);
+        if (s && t.was) Object.assign(s, t.was);
+      });
+      renderToday();
+      toast('Didn’t save — reverted: ' + e.message);
+    }
+  })();
+  optimistic.inflight.add(p);
+  p.finally(() => optimistic.inflight.delete(p));
+  return p;
+}
 
 // ---- tiny DOM helpers ----------------------------------------------------------
 
@@ -282,27 +370,21 @@ function recentComplete() {
 
 /** One tap on an empty chip logs the set: reps default to that set's last-time
  *  reps (fallback rx_reps_high); load is already prefilled server-side.
- *  A filled chip opens the set editor instead (tap-again-adjusts). */
-async function tapChip(set, chipBtn, exName) {
-  if (chipBtn.dataset.busy) return;
+ *  A filled chip opens the set editor instead (tap-again-adjusts).
+ *  OPTIMISTIC: the chip fills the instant it's tapped; the POST reconciles in
+ *  the background and reverts the chip only on a hard rejection. */
+function tapChip(set, chipBtn, exName) {
   if (set.actual_reps !== '' || String(set.skipped).toUpperCase() === 'TRUE') { openEditor(set, exName); return; }
   const ghost = state.open.ghosts[exName];
   const gReps = ghost && ghost.reps ? ghost.reps[Number(set.set_no) - 1] : null;
   const reps = gReps || Number(set.rx_reps_high) || Number(set.rx_reps_low);
   if (!reps) { openEditor(set, exName); return; } // AMRAP-style set: no sane default
-  chipBtn.dataset.busy = '1';
-  chipBtn.firstChild.textContent = '…';
-  try {
-    const r = await write({ action: 'log_set', set_id: set.set_id, actual_reps: reps });
-    if (!r.ok) throw new Error(r.error);
-    if (r.queued) set.actual_reps = String(reps);
-    else Object.assign(set, r.row);
-    renderToday();
-  } catch (e) {
-    if (e.nonJson) { await refresh(); return; } // write may have landed — verify by GET
-    toast('Log failed: ' + e.message);
-    renderToday();
-  }
+  const was = optimistic.snapshot(set);
+  set.actual_reps = String(reps);
+  optimistic.apply(set.set_id, { actual_reps: String(reps) });
+  renderToday();
+  reconcile({ action: 'log_set', set_id: set.set_id, actual_reps: reps },
+    [{ set_id: set.set_id, was }]);
 }
 
 // ---- set editor (bottom sheet, screens/exercise-form card) ----------------------
@@ -342,28 +424,24 @@ function openEditor(set, exName) {
     : '';
   const hint = meta.progression ? ' · progression: ' + meta.progression : '';
 
-  async function save(fields) {
-    sheetBusy(true);
-    try {
-      const body = Object.assign({ action: 'log_set', set_id: set.set_id }, fields);
-      const r = await write(body);
-      if (!r.ok) throw new Error(r.error);
-      if (r.queued) {
-        if (fields.actual_reps != null) set.actual_reps = String(fields.actual_reps);
-        if (fields.actual_load != null) set.actual_load = fields.actual_load;
-        if (fields.comment != null) set.comment = fields.comment;
-        if (fields.skipped != null) set.skipped = fields.skipped ? 'TRUE' : 'FALSE';
-      } else Object.assign(set, r.row);
-      closeSheet();
-      renderToday();
-      // auto-advance: next unlogged, unskipped set of this exercise
-      const next = exSets.find((s) => s.actual_reps === '' && String(s.skipped).toUpperCase() !== 'TRUE');
-      if (fields.actual_reps != null && next) openEditor(next, exName);
-    } catch (e) {
-      sheetBusy(false);
-      if (e.nonJson) { closeSheet(); await refresh(); return; }
-      toast('Save failed: ' + e.message);
-    }
+  /** OPTIMISTIC: apply locally, close the sheet, auto-advance immediately — the
+   *  between-sets flow never waits on the network. Reverts on hard rejection. */
+  function save(fields) {
+    const was = optimistic.snapshot(set);
+    const local = {};
+    if ('actual_reps' in fields) local.actual_reps = fields.actual_reps == null ? '' : String(fields.actual_reps);
+    if ('actual_load' in fields) local.actual_load = fields.actual_load;
+    if ('comment' in fields) local.comment = fields.comment;
+    if ('skipped' in fields) local.skipped = fields.skipped ? 'TRUE' : 'FALSE';
+    Object.assign(set, local);
+    optimistic.apply(set.set_id, local);
+    closeSheet();
+    renderToday();
+    reconcile(Object.assign({ action: 'log_set', set_id: set.set_id }, fields),
+      [{ set_id: set.set_id, was }]);
+    // auto-advance: next unlogged, unskipped set of this exercise
+    const next = exSets.find((s) => s.actual_reps === '' && String(s.skipped).toUpperCase() !== 'TRUE');
+    if (fields.actual_reps != null && next) openEditor(next, exName);
   }
 
   openSheet(
@@ -420,36 +498,39 @@ function sheetBusy(b) {
 
 // ---- skip exercise / session notes / complete ------------------------------------
 
-async function skipExercise(exName) {
-  try {
-    const r = await write({ action: 'skip_exercise', session_id: state.open.session.session_id, exercise: exName });
-    if (!r.ok) throw new Error(r.error);
-    if (r.queued) {
-      state.open.sets.forEach((s) => {
-        if (s.exercise === exName && s.actual_reps === '') { s.skipped = 'TRUE'; if (!s.comment) s.comment = 'skipped for time'; }
-      });
-      renderToday();
-    } else await refresh();
-  } catch (e) {
-    if (e.nonJson) { await refresh(); return; }
-    toast('Skip failed: ' + e.message);
-  }
+/** OPTIMISTIC: the card greys out instantly; one background POST covers every
+ *  affected set, and a hard rejection restores each of them. */
+function skipExercise(exName) {
+  const targets = [];
+  state.open.sets.forEach((s) => {
+    if (s.exercise !== exName || s.actual_reps !== '' || String(s.skipped).toUpperCase() === 'TRUE') return;
+    targets.push({ set_id: s.set_id, was: optimistic.snapshot(s) });
+    s.skipped = 'TRUE';
+    if (!s.comment) s.comment = 'skipped for time';
+    optimistic.apply(s.set_id, { skipped: 'TRUE', comment: s.comment });
+  });
+  if (!targets.length) return;
+  renderToday();
+  reconcile({ action: 'skip_exercise', session_id: state.open.session.session_id, exercise: exName }, targets);
 }
 
 let noteTimer;
 function saveNotes(text) {
   const sessionId = state.open.session.session_id; // capture NOW — session may roll over mid-debounce
+  state.open.session.session_notes = text; // optimistic; the textarea already shows it
   clearTimeout(noteTimer);
-  noteTimer = setTimeout(async () => {
-    try {
-      const r = await write({ action: 'session_note', session_id: sessionId, text });
-      if (!r.ok) throw new Error(r.error);
-      state.open.session.session_notes = text;
-      if (!r.queued) toast('Notes saved.');
-    } catch (e) {
-      if (e.nonJson) { await refresh(); return; }
-      toast('Notes failed: ' + e.message);
-    }
+  noteTimer = setTimeout(() => {
+    const p = (async () => {
+      try {
+        const r = await write({ action: 'session_note', session_id: sessionId, text });
+        if (!r.ok) throw new Error(r.error);
+      } catch (e) {
+        if (e.nonJson) { try { await refresh(); } catch (_) { /* offline */ } return; }
+        toast('Notes didn’t save: ' + e.message);
+      }
+    })();
+    optimistic.inflight.add(p); // Complete waits for notes too
+    p.finally(() => optimistic.inflight.delete(p));
   }, 600);
 }
 
@@ -486,8 +567,15 @@ function confirmComplete(btn) {
 async function completeSession(btn) {
   const prevId = state.open.session.session_id;
   const prevDay = state.open.session.day_label;
+  btn.disabled = true; btn.textContent = 'Syncing…';
+  setSub('Syncing…');
+  // Optimism ends here: complete_v2 snapshots the SHEET, so every pending write
+  // must land (or queue) first — otherwise an in-flight set would be stamped
+  // "(skipped for time)" by the very completion that raced past it.
+  await optimistic.settle();
+  if (queue.length && navigator.onLine) await flushQueue();
   const logged = state.open.sets.some((s) => s.actual_reps !== '');
-  btn.disabled = true; btn.textContent = 'Finishing…';
+  btn.textContent = 'Finishing…';
   setSub('Finishing…');
   try {
     const r = await write(Object.assign({ action: 'complete_v2' }, logged ? {} : { allowEmpty: true }));
@@ -625,7 +713,8 @@ async function probeUndo() {
 function chip(set, exName) {
   const logged = set.actual_reps !== '';
   const below = logged && set.rx_reps_low !== '' && Number(set.actual_reps) < Number(set.rx_reps_low);
-  const cls = 'setchip' + (logged ? (below ? ' low' : ' filled') : '');
+  const cls = 'setchip' + (logged ? (below ? ' low' : ' filled') : '')
+    + (optimistic.mut.has(set.set_id) ? ' pending' : '');
   const b = el('button', { class: cls },
     el('span', {}, logged ? set.actual_reps : '–'),
     el('small', {}, logged ? (below ? 'below rx' : 'reps') : 'tap'));
@@ -713,6 +802,7 @@ async function refresh() {
   const r = await api.get('open');
   if (!r.ok) throw new Error(r.error || 'API error');
   state.open = r.open;
+  optimistic.reapply(state.open); // pending writes beat the fetched snapshot
   state.stale = false;
   state.apiVersion = Number(r.version) || 0;
   try { localStorage.setItem(LS.lastGood, JSON.stringify({ open: r.open, ts: Date.now() })); }
