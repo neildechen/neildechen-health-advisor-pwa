@@ -76,6 +76,12 @@ const api = {
 // Failed WRITES (network-level, not API rejections) append here and flush FIFO on
 // connectivity/visibility events. Reads render last-known-good with a stale marker.
 
+// Per-page-load nonce: overlay versions only mean anything within one load
+// (optimistic.mut is memory-only), so queued items are stamped with the load
+// they came from — a flush landing an item from an OLDER load must never clear
+// this load's overlay entries (they are newer by construction).
+const LOAD_ID = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
 const queue = {
   read() { try { return JSON.parse(localStorage.getItem(LS.queue)) || []; } catch (_) { return []; } },
   write(q) {
@@ -83,7 +89,7 @@ const queue = {
     catch (_) { toast('Storage full — queued writes may not survive a reload.'); }
     updateBadge();
   },
-  push(body) { const q = this.read(); q.push({ body, ts: Date.now() }); this.write(q); },
+  push(body, v) { const q = this.read(); q.push({ body, ts: Date.now(), lid: LOAD_ID, v: v || 0 }); this.write(q); },
   get length() { return this.read().length; },
 };
 
@@ -98,14 +104,25 @@ function isNetworkError(e) { return e instanceof TypeError || /fetch|network/i.t
 
 /** Write with offline fallback. Returns {queued:true} when the write was stored
  *  for later flush — callers apply the change optimistically. API rejections
- *  (ok:false) are real errors and are NOT queued. */
-async function write(body) {
+ *  (ok:false) are real errors and are NOT queued.
+ *  FIFO integrity: a new write never overtakes older queued writes — with
+ *  anything still queued we first try to drain, and if the queue survives
+ *  (offline/busy) the new write joins it in order instead of jumping ahead. */
+async function write(body, v) {
+  if (queue.length) {
+    await flushQueue();
+    if (queue.length) {
+      queue.push(body, v);
+      toast('Saved offline — will sync (' + queue.length + ' queued).');
+      return { ok: true, queued: true };
+    }
+  }
   try {
     const r = await api.post(body);
     // The script lock rejects writes while a completion is running ("busy — another
     // write is running"). That's transient, not a user error: queue and move on.
     if (r && r.ok === false && /busy/i.test(r.error || '')) {
-      queue.push(body);
+      queue.push(body, v);
       toast('Server busy — queued, will retry.');
       return { ok: true, queued: true };
     }
@@ -113,48 +130,66 @@ async function write(body) {
   } catch (e) {
     if (e.nonJson) throw e;           // landed-but-HTML: caller verifies by GET
     if (!isNetworkError(e)) throw e;
-    queue.push(body);
+    queue.push(body, v);
     toast('Saved offline — will sync (' + queue.length + ' queued).');
     return { ok: true, queued: true };
   }
 }
 
-let flushing = false;
-async function flushQueue() {
-  if (flushing) return;
+/** Concurrent-safe: callers awaiting a flush that's already running get the REAL
+ *  completion promise (Complete's settle-then-flush gate depends on this — an
+ *  instant no-op return would let it submit over an undrained queue). */
+let flushP = null;
+function flushQueue() {
+  if (flushP) return flushP;
+  flushP = flushQueueRun().finally(() => { flushP = null; });
+  return flushP;
+}
+async function flushQueueRun() {
   const q = queue.read();
   if (!q.length) return;
-  flushing = true;
-  let landed = 0;
-  try {
-    while (q.length) {
-      try {
-        const r = await api.post(q[0].body); // nonJson counts as landed (verify by GET after)
-        if (r && r.ok === false && /busy/i.test(r.error || '')) break; // transient — retry later
-        // Any other API rejection is permanent (e.g. set_id from a superseded
-        // session): drop it rather than wedging the queue forever.
-        clearOptimisticFor(q[0].body);
-        q.shift(); landed++;
-        queue.write(q);
-      } catch (e) {
-        if (e.nonJson) { clearOptimisticFor(q[0].body); q.shift(); landed++; queue.write(q); continue; }
-        break;                          // still offline — keep FIFO order, retry later
-      }
+  let landed = 0, dropped = 0, dropErr = '';
+  while (q.length) {
+    try {
+      const r = await api.post(q[0].body); // nonJson counts as landed (verify by GET after)
+      if (r && r.ok === false && /busy/i.test(r.error || '')) break; // transient — retry later
+      if (r && r.ok === false) {
+        // Permanent rejection (e.g. set_id from a superseded session): drop it
+        // rather than wedging the queue — but SAY so; the user believes it saved.
+        dropped++; dropErr = r.error || 'rejected';
+      } else landed++;
+      clearOptimisticFor(q[0]);
+      q.shift();
+      queue.write(q);
+    } catch (e) {
+      if (e.nonJson) { clearOptimisticFor(q[0]); q.shift(); landed++; queue.write(q); continue; }
+      break;                          // still offline — keep FIFO order, retry later
     }
-  } finally {
-    flushing = false;
   }
-  if (landed) {
+  if (dropped) {
+    toast(dropped + ' queued write' + (dropped > 1 ? 's were' : ' was') + ' rejected and dropped: ' + dropErr);
+  } else if (landed) {
     toast('Synced ' + landed + ' queued write' + (landed > 1 ? 's' : '') + '.');
+  }
+  if (landed || dropped) {
     try { await refresh(); } catch (_) { /* offline again */ }
   }
 }
 /** A queued write that finally lands stops being "pending" — release its overlay
- *  entries so the follow-up refresh's server truth stands on its own. */
-function clearOptimisticFor(body) {
-  if (body.set_id) optimistic.clear(body.set_id);
+ *  entries so the follow-up refresh's server truth stands on its own. VERSIONED:
+ *  an item from an older page load, or one older than the set's current overlay
+ *  entry, must never clear it — the entry is protecting a NEWER value. */
+function clearOptimisticFor(item) {
+  const body = item.body || item; // tolerate raw bodies
+  const stale = item.lid !== LOAD_ID; // older load: this load's overlay is newer
+  const release = (setId) => {
+    if (stale) return;
+    const e = optimistic.mut.get(setId);
+    if (e && e.v <= (item.v || 0)) optimistic.clear(setId);
+  };
+  if (body.set_id) release(body.set_id);
   else if (body.action === 'skip_exercise' && state.open && state.open.sets) {
-    state.open.sets.forEach((s) => { if (s.exercise === body.exercise) optimistic.clear(s.set_id); });
+    state.open.sets.forEach((s) => { if (s.exercise === body.exercise) release(s.set_id); });
   }
 }
 
@@ -168,23 +203,58 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) flus
 // Complete can wait for the sheet to actually hold what the screen shows.
 
 const optimistic = {
-  mut: new Map(),      // set_id -> locally-applied fields not yet acked (or queued)
+  // set_id -> { fields, base, v }: the locally-applied fields not yet acked,
+  // the ORIGINAL server truth from before the first optimistic touch (reverts
+  // always land there, never on an intermediate optimistic value), and a
+  // version stamp so an older write's ack/revert can't disturb a newer one.
+  mut: new Map(),
+  ctr: 0,
   inflight: new Set(), // unresolved reconcile promises
   snapshot(set) {
     return { actual_reps: set.actual_reps, actual_load: set.actual_load,
       comment: set.comment, skipped: set.skipped };
   },
-  apply(setId, fields) {
-    this.mut.set(setId, Object.assign(this.mut.get(setId) || {}, fields));
+  /** Perform an optimistic mutation: snapshot the original server truth FIRST
+   *  (only on the set's first pending touch), then apply the fields to the set
+   *  and record them. Returns the mutation's version stamp. Callers must NOT
+   *  pre-mutate the set — the base snapshot is what reverts restore. */
+  apply(set, fields) {
+    let e = this.mut.get(set.set_id);
+    if (!e) { e = { fields: {}, base: this.snapshot(set), v: 0 }; this.mut.set(set.set_id, e); }
+    Object.assign(set, fields);
+    Object.assign(e.fields, fields);
+    e.v = ++this.ctr;
+    return e.v;
+  },
+  /** Ack from the write that produced version v. Clears the entry ONLY when no
+   *  newer write is stacked on the same set (else that write's ack finishes the
+   *  job). Returns whether the caller may merge the server row. */
+  ack(setId, v) {
+    const e = this.mut.get(setId);
+    if (!e) return false;
+    if (e.v !== v) return false; // newer optimistic value pending — don't clobber
+    this.mut.delete(setId);
+    return true;
+  },
+  /** Revert to the original server truth — but only if the rejected write is
+   *  still the newest for this set; a newer stacked write's own reconcile
+   *  decides otherwise (its base is the same original truth). */
+  revertIfCurrent(setId, v) {
+    const e = this.mut.get(setId);
+    if (!e || e.v !== v) return false;
+    const s = findSet(setId);
+    if (s) Object.assign(s, e.base);
+    this.mut.delete(setId);
+    return true;
   },
   clear(setId) { this.mut.delete(setId); },
   /** After refresh(): pending local truth wins over the fetched snapshot. Entries
    *  whose set_id no longer exists (session rolled over) are dropped. */
   reapply(open) {
     if (!open || !open.sets) return;
-    this.mut.forEach((fields, id) => {
+    this.mut.forEach((e, id) => {
       const s = open.sets.find((r) => r.set_id === id);
-      if (s) Object.assign(s, fields); else this.mut.delete(id);
+      if (s) Object.assign(s, e.fields); else this.mut.delete(id);
     });
   },
   /** Resolve when nothing is in flight (Complete gates on this — the server must
@@ -199,19 +269,33 @@ function findSet(setId) {
     ? state.open.sets.find((r) => r.set_id === setId) : null;
 }
 
-/** Background reconcile of one optimistic write. targets = [{set_id, was}], with
- *  `was` the pre-mutation snapshot for revert. Outcomes: ack -> merge canonical
- *  row, clear pending; queued (offline/busy) -> optimistic state stands, the
- *  flush->refresh path finishes the job; non-JSON -> probably landed, verify by
- *  GET; hard rejection -> revert the touched fields and tell the user. */
+/** Per-set write serialization: two quick writes to the same set must reach the
+ *  sheet in tap order — concurrent fetches carry no ordering guarantee, and a
+ *  reordered pair would leave the sheet holding the OLDER value. */
+const setChains = new Map();
+function chainFor(setIds, fn) {
+  const prev = Promise.allSettled(setIds.map((id) => setChains.get(id) || Promise.resolve()));
+  const run = prev.then(fn, fn);
+  setIds.forEach((id) => setChains.set(id, run));
+  run.finally(() => setIds.forEach((id) => { if (setChains.get(id) === run) setChains.delete(id); }));
+  return run;
+}
+
+/** Background reconcile of one optimistic write. targets = [{set_id, v}] with v
+ *  the overlay version this write produced. Outcomes: ack -> clear pending and
+ *  merge the canonical row (unless a newer write is stacked); queued
+ *  (offline/busy) -> optimistic state stands, the flush->refresh path finishes
+ *  the job; non-JSON -> probably landed, verify by GET; hard rejection ->
+ *  revert to original server truth and tell the user. */
 function reconcile(body, targets) {
-  const p = (async () => {
+  const p = chainFor(targets.map((t) => t.set_id), async () => {
     try {
-      const r = await write(body);
+      const r = await write(body, Math.max.apply(null, targets.map((t) => t.v)));
       if (r && r.ok === false) throw new Error(r.error || 'rejected');
       if (r && r.queued) return; // overlay stands until the queue flushes
-      targets.forEach((t) => optimistic.clear(t.set_id));
-      if (r && r.row) { const s = findSet(r.row.set_id); if (s) Object.assign(s, r.row); }
+      let mergeable = true;
+      targets.forEach((t) => { if (!optimistic.ack(t.set_id, t.v)) mergeable = false; });
+      if (mergeable && r && r.row) { const s = findSet(r.row.set_id); if (s) Object.assign(s, r.row); }
       renderToday();
     } catch (e) {
       if (e.nonJson) { // write may have landed — the sheet is the tiebreaker
@@ -219,15 +303,14 @@ function reconcile(body, targets) {
         try { await refresh(); } catch (_) { /* offline right after */ }
         return;
       }
-      targets.forEach((t) => {
-        optimistic.clear(t.set_id);
-        const s = findSet(t.set_id);
-        if (s && t.was) Object.assign(s, t.was);
-      });
-      renderToday();
-      toast('Didn’t save — reverted: ' + e.message);
+      let reverted = 0;
+      targets.forEach((t) => { if (optimistic.revertIfCurrent(t.set_id, t.v)) reverted++; });
+      if (reverted) {
+        renderToday();
+        toast('Didn’t save — reverted: ' + e.message);
+      }
     }
-  })();
+  });
   optimistic.inflight.add(p);
   p.finally(() => optimistic.inflight.delete(p));
   return p;
@@ -379,12 +462,10 @@ function tapChip(set, chipBtn, exName) {
   const gReps = ghost && ghost.reps ? ghost.reps[Number(set.set_no) - 1] : null;
   const reps = gReps || Number(set.rx_reps_high) || Number(set.rx_reps_low);
   if (!reps) { openEditor(set, exName); return; } // AMRAP-style set: no sane default
-  const was = optimistic.snapshot(set);
-  set.actual_reps = String(reps);
-  optimistic.apply(set.set_id, { actual_reps: String(reps) });
+  const v = optimistic.apply(set, { actual_reps: String(reps) });
   renderToday();
   reconcile({ action: 'log_set', set_id: set.set_id, actual_reps: reps },
-    [{ set_id: set.set_id, was }]);
+    [{ set_id: set.set_id, v }]);
 }
 
 // ---- set editor (bottom sheet, screens/exercise-form card) ----------------------
@@ -427,18 +508,16 @@ function openEditor(set, exName) {
   /** OPTIMISTIC: apply locally, close the sheet, auto-advance immediately — the
    *  between-sets flow never waits on the network. Reverts on hard rejection. */
   function save(fields) {
-    const was = optimistic.snapshot(set);
     const local = {};
     if ('actual_reps' in fields) local.actual_reps = fields.actual_reps == null ? '' : String(fields.actual_reps);
     if ('actual_load' in fields) local.actual_load = fields.actual_load;
     if ('comment' in fields) local.comment = fields.comment;
     if ('skipped' in fields) local.skipped = fields.skipped ? 'TRUE' : 'FALSE';
-    Object.assign(set, local);
-    optimistic.apply(set.set_id, local);
+    const v = optimistic.apply(set, local);
     closeSheet();
     renderToday();
     reconcile(Object.assign({ action: 'log_set', set_id: set.set_id }, fields),
-      [{ set_id: set.set_id, was }]);
+      [{ set_id: set.set_id, v }]);
     // auto-advance: next unlogged, unskipped set of this exercise
     const next = exSets.find((s) => s.actual_reps === '' && String(s.skipped).toUpperCase() !== 'TRUE');
     if (fields.actual_reps != null && next) openEditor(next, exName);
@@ -504,10 +583,8 @@ function skipExercise(exName) {
   const targets = [];
   state.open.sets.forEach((s) => {
     if (s.exercise !== exName || s.actual_reps !== '' || String(s.skipped).toUpperCase() === 'TRUE') return;
-    targets.push({ set_id: s.set_id, was: optimistic.snapshot(s) });
-    s.skipped = 'TRUE';
-    if (!s.comment) s.comment = 'skipped for time';
-    optimistic.apply(s.set_id, { skipped: 'TRUE', comment: s.comment });
+    const fields = { skipped: 'TRUE', comment: s.comment || 'skipped for time' };
+    targets.push({ set_id: s.set_id, v: optimistic.apply(s, fields) });
   });
   if (!targets.length) return;
   renderToday();
@@ -597,6 +674,7 @@ async function completeSession(btn) {
       const r = await api.get('open');
       if (r.ok && r.open && r.open.session && r.open.session.session_id !== prevId) {
         state.open = r.open;
+        optimistic.reapply(state.open); // drops entries orphaned by the rollover
         try { localStorage.setItem(LS.lastComplete, JSON.stringify({ id: prevId, day: prevDay, ts: Date.now() })); }
         catch (_) { /* quota: the post-submit snackbar still offers Undo */ }
         renderToday();
