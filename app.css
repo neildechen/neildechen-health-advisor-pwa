@@ -86,6 +86,10 @@ button:active{transform:translateY(1px)}
 .setchip.low{border-color:var(--core);color:var(--core)}
 .setchip.low small{color:var(--core)}
 button.setchip{cursor:pointer}
+/* optimistic write awaiting server ack — subtle: committed look, faint pulse */
+.setchip.pending{animation:pendpulse 1.2s ease-in-out infinite}
+@keyframes pendpulse{0%,100%{opacity:1}50%{opacity:.55}}
+.ex.skipped .setchip.pending{animation:none;opacity:.7}
 .toastbar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%) translateY(80px);
   background:var(--ink);color:#fff;border-radius:10px;padding:.6rem .9rem;font:.85rem system-ui;
   transition:transform .2s;max-width:90vw;z-index:9}
