@@ -1,4 +1,4 @@
-/* Health Advisor logging PWA — P3: Today screen + 1-tap chips.
+/* Health Advisor logging PWA — P4: submit guard + undo_complete recovery.
  * Spec: gym-programmer docs/pwa-build-spec.md. Design truth: designs/ cards.
  *
  * Security model: EXEC_URL and TOKEN live in localStorage ONLY — entered on the
@@ -9,7 +9,8 @@
  */
 'use strict';
 
-const LS = { execUrl: 'ha.execUrl', token: 'ha.token', lastGood: 'ha.lastGood', queue: 'ha.queue' };
+const LS = { execUrl: 'ha.execUrl', token: 'ha.token', lastGood: 'ha.lastGood', queue: 'ha.queue',
+  lastComplete: 'ha.lastComplete', undoCap: 'ha.undoCap' };
 
 const cfg = {
   get execUrl() { return localStorage.getItem(LS.execUrl) || ''; },
@@ -213,7 +214,7 @@ function renderSetup(prefillError) {
 
 // ---- Today screen ---------------------------------------------------------------
 
-const state = { open: null };
+const state = { open: null, apiVersion: 0, undoDeployed: false };
 
 function fmtDate(iso) {
   const d = new Date(iso + 'T12:00:00');
@@ -244,14 +245,39 @@ function sessionHeader(o) {
   const s = o.session, r = o.rotation;
   const dots = (r.order || []).map((_, i) =>
     el('span', { class: i < (r.position || 0) ? 'on' : '' }));
+  const rc = recentComplete();
   return el('div', { class: 'sessioncard' },
-    el('div', { class: 'day' }, s.day_label,
+    el('div', { class: 'day' }, s.day_label + (r.emphasis ? ' — ' + r.emphasis : ''),
       state.stale ? el('span', { class: 'stale', style: 'margin-left:.5rem;vertical-align:middle' }, 'offline · stale') : null),
     el('div', { class: 'meta' },
       fmtDate(s.date) + (r.last_session_date ? ' · last session ' + daysAgoText(r.last_session_date) : '')),
     el('div', { class: 'rot' }, dots,
       el('em', {}, (r.position || '?') + ' of ' + (r.order || []).length + ' · next: ' + (r.next || '—'))),
+    state.undoDeployed && rc ? el('div', { class: 'undoline' },
+      'Submitted ' + rc.day + ' by mistake? ',
+      el('button', { class: 'linkbtn', onclick: () => startUndo(false, 0) }, 'Undo')) : null,
   );
+}
+
+/** Logged / skipped / blank tallies for the guard dialog and the submit gate. */
+function setCounts(sets) {
+  const c = { logged: 0, skipped: 0, blank: 0, total: sets.length };
+  sets.forEach((s) => {
+    if (s.actual_reps !== '') c.logged++;
+    else if (String(s.skipped).toUpperCase() === 'TRUE') c.skipped++;
+    else c.blank++;
+  });
+  return c;
+}
+
+/** The completion this device performed in the last 20 minutes, if any — the
+ *  window in which "wait, that submit was an accident" realistically happens. */
+function recentComplete() {
+  try {
+    const c = JSON.parse(localStorage.getItem(LS.lastComplete));
+    if (c && c.id && Date.now() - c.ts < 20 * 60 * 1000) return c;
+  } catch (_) { /* corrupt/missing */ }
+  return null;
 }
 
 /** One tap on an empty chip logs the set: reps default to that set's last-time
@@ -427,12 +453,40 @@ function saveNotes(text) {
   }, 600);
 }
 
+/** Submit guard (2026-07-11 incident: one stray tap completed a mid-workout
+ *  session and advanced the rotation). The bare button now only opens this
+ *  sheet; completing takes a second, separated tap on a dialog that shows
+ *  exactly what will be submitted, and blank-heavy submits warn loudly. */
+function confirmComplete(btn) {
+  const o = state.open;
+  const c = setCounts(o.sets);
+  const loud = c.blank > 0 && c.blank >= c.logged;
+  openSheet(
+    el('div', { class: 'appbar', style: 'border-radius:10px' },
+      el('div', {},
+        el('div', { class: 't' }, 'Complete this session?'),
+        el('div', { class: 'sub' }, o.session.day_label + ' · ' + fmtDate(o.session.date)))),
+    el('div', { class: 'formcard' },
+      el('div', { class: 'label' }, 'What gets submitted'),
+      el('div', { class: 'rxline' }, el('span', {}, 'Logged sets'), el('b', {}, c.logged + ' of ' + c.total)),
+      c.skipped ? el('div', { class: 'rxline' }, el('span', {}, 'Skipped'), el('b', {}, String(c.skipped))) : null,
+      c.blank ? el('div', { class: 'err' },
+        (loud ? 'Heads up — most of this session is still blank. ' : '') +
+        c.blank + ' blank set' + (c.blank > 1 ? 's' : '') + ' will be marked "(skipped for time)".') : null,
+      el('div', { class: 'hint' },
+        'This closes today, advances the rotation, and loads ' + (o.rotation.next || 'the next day') + '.')),
+    el('div', { class: 'formbtns' },
+      el('button', { class: 'primary', onclick: () => { closeSheet(); completeSession(btn); } }, 'Complete Session'),
+      el('button', { class: 'ghostbtn', onclick: closeSheet }, 'Cancel')),
+  );
+}
+
 /** Complete → complete-requested → "Finishing…" → poll view=open (2s, ≤90s)
  *  until a NEW session materializes. Double-taps are idempotent server-side. */
 async function completeSession(btn) {
   const prevId = state.open.session.session_id;
+  const prevDay = state.open.session.day_label;
   const logged = state.open.sets.some((s) => s.actual_reps !== '');
-  if (!logged && !confirm('No sets logged — complete anyway?')) return;
   btn.disabled = true; btn.textContent = 'Finishing…';
   setSub('Finishing…');
   try {
@@ -455,14 +509,117 @@ async function completeSession(btn) {
       const r = await api.get('open');
       if (r.ok && r.open && r.open.session && r.open.session.session_id !== prevId) {
         state.open = r.open;
+        try { localStorage.setItem(LS.lastComplete, JSON.stringify({ id: prevId, day: prevDay, ts: Date.now() })); }
+        catch (_) { /* quota: the post-submit snackbar still offers Undo */ }
         renderToday();
-        toast('Session complete — next up: ' + r.open.session.day_label);
+        if (state.undoDeployed) {
+          toast('Session complete — next up: ' + r.open.session.day_label,
+            { action: 'Undo', onAction: () => startUndo(false, 0), ms: 15000 });
+        } else {
+          toast('Session complete — next up: ' + r.open.session.day_label);
+        }
         return;
       }
     } catch (_) { /* transient; keep polling */ }
   }
   toast('Still finishing server-side — pull to refresh in a minute.');
   await refresh();
+}
+
+// ---- undo_complete (accidental-submit recovery) -----------------------------------
+// Backend contract (gym-programmer V2.gs undoCompleteV2_): reopens the last completed
+// session (or body.session_id), discards the materialized open session — refusing with
+// {touched:N} when it has logged/skipped sets unless force:true — restores Next-Up,
+// clears auto "(skipped for time)" comments.
+
+/** Undo confirmation sheet. force=true is the second, louder confirmation shown
+ *  only after the server refused because the open session has touched sets. */
+function startUndo(force, touched) {
+  const rc = recentComplete();
+  const cur = state.open && state.open.session;
+  openSheet(
+    el('div', { class: 'appbar', style: 'border-radius:10px' },
+      el('div', {},
+        el('div', { class: 't' }, 'Undo last submit'),
+        el('div', { class: 'sub' }, rc ? 'Reopen ' + rc.day : 'Reopen the last completed session'))),
+    el('div', { class: 'formcard' },
+      el('div', { class: 'label' }, 'What this does'),
+      el('div', { class: 'lastline' },
+        'Reopens ' + (rc ? rc.day : 'the last completed session') +
+        ' with everything already logged intact, points Next-Up back at it, and clears the auto "(skipped for time)" comments.'),
+      cur ? el('div', { class: 'lastline' },
+        'The ' + cur.day_label + ' session it materialized will be discarded.') : null,
+      force ? el('div', { class: 'err' },
+        'The open ' + (cur ? cur.day_label + ' ' : '') + 'session already has ' + touched +
+        ' logged/skipped set' + (touched === 1 ? '' : 's') + '. Forcing the undo DELETES ' +
+        (touched === 1 ? 'it' : 'them') + ' permanently.') : null),
+    el('div', { class: 'formbtns' },
+      el('button', { class: 'primary' + (force ? ' danger' : ''), onclick: () => doUndo(force) },
+        force ? 'Delete sets & undo' : 'Undo submit'),
+      el('button', { class: 'ghostbtn', onclick: closeSheet }, 'Cancel')),
+  );
+}
+
+/** Fires undo_complete directly (never queued — replaying an undo later against
+ *  moved state would be worse than failing now). */
+async function doUndo(force) {
+  sheetBusy(true);
+  const rc = recentComplete();
+  const body = { action: 'undo_complete' };
+  if (rc) body.session_id = rc.id; // pin the target when this device did the submit
+  if (force) body.force = true;
+  let r;
+  try { r = await api.post(body); }
+  catch (e) {
+    sheetBusy(false);
+    if (e.nonJson) { closeSheet(); await refresh(); return; } // may have landed — show truth
+    toast(isNetworkError(e) ? 'Undo needs a connection — try again once online.' : 'Undo failed: ' + e.message);
+    return;
+  }
+  if (r.ok) {
+    try { localStorage.removeItem(LS.lastComplete); } catch (_) { /* fine */ }
+    closeSheet();
+    toast('Reopened ' + (r.day || r.reopened) + '.');
+    try { await refresh(); } catch (_) { /* went offline right after — stale render stands */ }
+    return;
+  }
+  sheetBusy(false);
+  const err = r.error || 'undo failed';
+  if (r.touched) { startUndo(true, Number(r.touched)); return; } // force path, second confirmation
+  if (/unknown action/i.test(err)) { // deployed build predates undo_complete
+    state.undoDeployed = false;
+    try { localStorage.removeItem(LS.undoCap); } catch (_) { /* fine */ }
+    closeSheet();
+    renderToday();
+    toast('Undo is not on the deployed API yet — it arrives with the next paste-deploy.');
+    return;
+  }
+  if (/busy/i.test(err)) { toast('Server busy — try again in a moment.'); return; }
+  if (/not complete|not found|no completed|no sessions/i.test(err)) {
+    closeSheet();
+    toast('Nothing to undo: ' + err);
+    try { await refresh(); } catch (_) { /* offline */ }
+    return;
+  }
+  toast('Undo failed: ' + err);
+}
+
+/** Is undo_complete live on the pinned deployment? ping can't say — API_VERSION
+ *  is 4 on both sides of that paste-deploy — so probe with a session_id that can
+ *  never exist: the new build answers 'session_id not found' (read-only path, no
+ *  write happens), an older build answers 'unknown action — …'. The positive
+ *  result is cached; a stale positive self-heals in doUndo's unknown-action arm. */
+async function probeUndo() {
+  if (state.undoDeployed) return;
+  if (localStorage.getItem(LS.undoCap) === '1') { state.undoDeployed = true; return; }
+  if (state.apiVersion && Number(state.apiVersion) < 4) return;
+  try {
+    const r = await api.post({ action: 'undo_complete', session_id: 'capability-probe' });
+    if (r && r.error === 'session_id not found') {
+      state.undoDeployed = true;
+      try { localStorage.setItem(LS.undoCap, '1'); } catch (_) { /* re-probe next boot */ }
+    }
+  } catch (_) { /* offline or busy — stay pessimistic, re-probe next boot */ }
 }
 
 function chip(set, exName) {
@@ -518,6 +675,10 @@ function renderToday() {
     if (!byEx[r.exercise]) { byEx[r.exercise] = []; groups.push(r.exercise); }
     byEx[r.exercise].push(r);
   });
+  // Defense in depth: nothing logged or skipped yet → the submit button is inert
+  // (an untouched session has nothing to submit; empty completes stay curl-only).
+  const c = setCounts(o.sets);
+  const canSubmit = c.logged + c.skipped > 0;
   show(
     sessionHeader(o),
     groups.map((ex) => exerciseCard(ex, byEx[ex])),
@@ -526,19 +687,26 @@ function renderToday() {
         placeholder: 'Session notes — sleep, energy, knee/shoulder, time available…',
         onchange: (e) => saveNotes(e.target.value) },
         s.session_notes || '')),
-    el('button', { class: 'fabbtn', onclick: (e) => completeSession(e.target) },
-      'Complete Session ✓'),
+    el('button', { class: 'fabbtn', disabled: !canSubmit,
+      onclick: (e) => confirmComplete(e.target) }, 'Complete Session ✓'),
+    canSubmit ? null : el('div', { class: 'hint', style: 'text-align:center' },
+      'Log or skip at least one set to enable submitting.'),
   );
 }
 
 let toastTimer;
-function toast(msg) {
+/** opts.action + opts.onAction render a snackbar button (e.g. post-submit Undo);
+ *  opts.ms overrides the auto-hide delay. */
+function toast(msg, opts) {
   let t = $('#toast');
   if (!t) { t = el('div', { id: 'toast', class: 'toastbar' }); document.body.append(t); }
-  t.textContent = msg;
+  t.replaceChildren(...[el('span', {}, msg),
+    opts && opts.action
+      ? el('button', { class: 'tact', onclick: () => { t.classList.remove('on'); opts.onAction(); } }, opts.action)
+      : null].filter(Boolean));
   t.classList.add('on');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('on'), 2600);
+  toastTimer = setTimeout(() => t.classList.remove('on'), (opts && opts.ms) || 2600);
 }
 
 async function refresh() {
@@ -546,6 +714,7 @@ async function refresh() {
   if (!r.ok) throw new Error(r.error || 'API error');
   state.open = r.open;
   state.stale = false;
+  state.apiVersion = Number(r.version) || 0;
   try { localStorage.setItem(LS.lastGood, JSON.stringify({ open: r.open, ts: Date.now() })); }
   catch (_) { /* private mode / quota: offline fallback just won't have data */ }
   renderToday();
@@ -561,6 +730,8 @@ async function boot() {
   try {
     await refresh();
     flushQueue();
+    // capability check is async — repaint if it unlocks a visible undo affordance
+    probeUndo().then(() => { if (state.undoDeployed && recentComplete() && state.open) renderToday(); });
   } catch (e) {
     if (/bad token/.test(e.message)) { renderSetup('The API said: bad token.'); return; }
     // offline: render last-known-good with a stale marker
