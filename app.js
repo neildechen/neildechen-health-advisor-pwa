@@ -194,7 +194,34 @@ function clearOptimisticFor(item) {
 }
 
 window.addEventListener('online', flushQueue);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) flushQueue(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  flushQueue();
+  resyncOnResume();
+});
+
+/** App resume: iOS keeps the PWA alive for days, and boot() only runs on a real
+ *  page load — a resumed app renders whatever session was in memory when it was
+ *  backgrounded (2026-07-23 incident: a Tuesday screen surfaced on Thursday and
+ *  its Complete hit a different open session). Re-fetch server truth on every
+ *  resume; offline keeps the stale render, marked as such in the header. */
+let resyncP = null;
+function resyncOnResume() {
+  if (!cfg.ready || !state.open || resyncP) return;
+  if (state.lastSync && Date.now() - state.lastSync < 60000) return; // just synced
+  resyncP = (async () => {
+    try {
+      const prevId = state.open.session && state.open.session.session_id;
+      await refresh();
+      const curId = state.open.session && state.open.session.session_id;
+      if (prevId && curId && prevId !== curId) {
+        toast('Screen was out of date — now showing ' + state.open.session.day_label + '.', { ms: 5000 });
+      }
+    } catch (_) {
+      if (!state.stale) { state.stale = Date.now(); renderToday(); } // can't verify — say so
+    } finally { resyncP = null; }
+  })();
+}
 
 // ---- optimistic writes ------------------------------------------------------------
 // The UI is the instant truth; the sheet catches up. Every set-level mutation is
@@ -651,11 +678,35 @@ async function completeSession(btn) {
   // "(skipped for time)" by the very completion that raced past it.
   await optimistic.settle();
   if (queue.length && navigator.onLine) await flushQueue();
-  const logged = state.open.sets.some((s) => s.actual_reps !== '');
+  // Fossil-screen guard (2026-07-23 incident): the submit — and especially the
+  // allowEmpty escalation — must be decided against the SERVER's open session,
+  // not this screen's. A resumed app can render a long-completed session; its
+  // Complete would otherwise close (or empty-complete) a session the user never
+  // saw. Offline: proceed without allowEmpty — the server's own empty guard
+  // stays the backstop, and an intentional empty complete can wait for signal.
+  let logged = state.open.sets.some((s) => s.actual_reps !== '');
+  let verified = false;
+  try {
+    const chk = await api.get('open');
+    if (chk.ok && chk.open) {
+      const sid = chk.open.session && chk.open.session.session_id;
+      if (sid !== prevId) {
+        state.open = chk.open;
+        optimistic.reapply(state.open);
+        renderToday();
+        setSub('Active session');
+        toast('This screen was out of date — loaded the real open session ('
+          + (chk.open.session ? chk.open.session.day_label : 'none') + '). Nothing was submitted.', { ms: 6000 });
+        return;
+      }
+      verified = true;
+      logged = chk.open.sets.some((s) => s.actual_reps !== '');
+    }
+  } catch (_) { /* offline/transient — fall through, allowEmpty stays off */ }
   btn.textContent = 'Finishing…';
   setSub('Finishing…');
   try {
-    const r = await write(Object.assign({ action: 'complete_v2' }, logged ? {} : { allowEmpty: true }));
+    const r = await write(Object.assign({ action: 'complete_v2' }, (verified && !logged) ? { allowEmpty: true } : {}));
     if (!r.ok && r.reason === 'empty') { toast(r.message); btn.disabled = false; btn.textContent = 'Complete Session ✓'; return; }
     if (!r.ok) throw new Error(r.error || 'complete failed');
     if (r.queued) { toast('Completion queued — will finish when back online.'); setSub('Offline'); return; }
@@ -882,6 +933,7 @@ async function refresh() {
   state.open = r.open;
   optimistic.reapply(state.open); // pending writes beat the fetched snapshot
   state.stale = false;
+  state.lastSync = Date.now();
   state.apiVersion = Number(r.version) || 0;
   try { localStorage.setItem(LS.lastGood, JSON.stringify({ open: r.open, ts: Date.now() })); }
   catch (_) { /* private mode / quota: offline fallback just won't have data */ }
