@@ -106,3 +106,11 @@ button.setchip{cursor:pointer}
 .toastbar .tact{background:none;border:none;color:var(--accent-soft);font:700 .78rem system-ui;
   letter-spacing:.06em;text-transform:uppercase;padding:.2rem 0;white-space:nowrap}
 .formbtns .primary.danger{background:#B3261E}
+/* stepper value is a typeable input — 16px so iOS doesn't zoom the sheet on focus */
+.setrow .stepper input.stepval{border:none;border-radius:0;width:58px;padding:.35rem 0;
+  background:transparent;color:var(--ink);text-align:center;
+  font:600 16px/1.35 system-ui;font-variant-numeric:tabular-nums}
+.setrow .stepper input.stepval:focus{outline:none;background:var(--accent-soft)}
+/* finish-yesterday card (deferred-Complete ritual) */
+.staleopen{border-color:var(--accent);background:var(--accent-soft)}
+.staleopen .fabbtn{margin-top:.65rem;padding:.7rem;box-shadow:none}

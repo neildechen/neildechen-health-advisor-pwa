@@ -512,17 +512,31 @@ function openEditor(set, exName) {
     Number(set.rx_reps_high) || Number(set.rx_reps_low) || 0;
   // load state — text end-to-end; "+" preserved
   let load = set.actual_load || set.rx_load || '';
-  const plus = load.startsWith('+');
   const numericLoad = LOAD_SHAPE.test(load);
 
-  const repsOut = el('output', {}, String(reps));
-  const loadOut = el('output', {}, load || '—');
-  const bump = (d) => { reps = Math.max(0, reps + d); repsOut.textContent = String(reps); };
+  // The stepper number is itself an input: tap it to type, buttons still step.
+  // Blur snaps reps back to the value Save will use, so a cleared/garbled field
+  // never LOOKS logged while saving null.
+  const repsOut = el('input', { class: 'stepval', type: 'text', inputmode: 'numeric',
+    autocomplete: 'off', value: String(reps),
+    onfocus: (e) => e.target.select(),
+    oninput: (e) => { const n = parseInt(e.target.value, 10); reps = isFinite(n) && n > 0 ? n : 0; },
+    onblur: (e) => { e.target.value = String(reps); } });
+  const loadUnit = el('span', { class: 'u' });
+  const syncLoadUnit = () => { loadUnit.textContent = load.startsWith('+') ? 'lb added' : 'lb'; };
+  const loadOut = el('input', { class: 'stepval', type: 'text', inputmode: 'decimal',
+    autocomplete: 'off', autocapitalize: 'none', value: load,
+    onfocus: (e) => e.target.select(),
+    oninput: (e) => { load = e.target.value.trim(); syncLoadUnit(); } });
+  const bump = (d) => { reps = Math.max(0, reps + d); repsOut.value = String(reps); };
   const bumpLoad = (d) => {
+    const plusNow = load.startsWith('+'); // typing may add/drop the prefix — re-read it
     const n = Math.max(0, (parseFloat(load.replace('+', '')) || 0) + d);
-    load = (plus ? '+' : '') + (Number.isInteger(n) ? n : n.toFixed(1));
-    loadOut.textContent = load;
+    load = (plusNow ? '+' : '') + (Number.isInteger(n) ? n : n.toFixed(1));
+    loadOut.value = load;
+    syncLoadUnit();
   };
+  syncLoadUnit();
   const cmt = el('textarea', { class: 'cmt', rows: '2', placeholder: 'grip, pain, tempo… free text' }, set.comment || '');
   const loadFree = el('input', { type: 'text', value: load, autocapitalize: 'none',
     oninput: (e) => { load = e.target.value.trim(); } });
@@ -576,7 +590,7 @@ function openEditor(set, exName) {
             el('div', { class: 'stepper' },
               el('button', { type: 'button', onclick: () => bumpLoad(-inc) }, '−'), loadOut,
               el('button', { type: 'button', onclick: () => bumpLoad(inc) }, '+')),
-            el('span', { class: 'u' }, plus ? 'lb added · stored as "' + load + '"' : 'lb'))
+            loadUnit)
         : el('div', { class: 'setrow' },
             el('span', { class: 'sn' }, 'Load'),
             loadFree,
@@ -875,6 +889,42 @@ function exerciseCard(exName, sets) {
   );
 }
 
+/** The deferred-Complete ritual (2026-08-19 usage review): sessions get logged at
+ *  the gym but completed the NEXT morning, seconds before the next workout starts.
+ *  When the open session has logged work whose last set is >8 h old, lead the screen
+ *  with a finish-it card — its button opens the normal confirm sheet, so completing
+ *  still takes the second, deliberate tap and the server-session verification. */
+const STALE_OPEN_MS = 8 * 3600 * 1000;
+function lastLoggedAt() {
+  let max = 0;
+  ((state.open && state.open.sets) || []).forEach((s) => {
+    if (!s.logged_at) return;
+    // sheet-local timestamp parsed as device-local — same TZ in practice, and the
+    // 8 h threshold absorbs any wobble
+    const t = new Date(String(s.logged_at).replace(' ', 'T')).getTime();
+    if (isFinite(t) && t > max) max = t;
+  });
+  return max;
+}
+function finishStaleCard() {
+  const o = state.open;
+  const c = setCounts(o.sets);
+  if (!c.logged && !c.skipped) return null;
+  const last = lastLoggedAt();
+  if (!last || Date.now() - last < STALE_OPEN_MS) return null;
+  const d = new Date(last);
+  const iso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+    + '-' + String(d.getDate()).padStart(2, '0');
+  const when = daysAgoText(iso) === 'today' ? 'earlier today' : daysAgoText(iso);
+  return el('div', { class: 'sessioncard staleopen' },
+    el('div', { class: 'day' }, 'Finish ' + o.session.day_label + '?'),
+    el('div', { class: 'meta' },
+      c.logged + ' of ' + c.total + ' sets logged, last ' + when +
+      ' — completing loads ' + (o.rotation.next || 'the next day') + '.'),
+    el('button', { class: 'fabbtn', onclick: (e) => confirmComplete(e.target) },
+      'Finish & load ' + (o.rotation.next || 'next day')));
+}
+
 function renderToday() {
   const o = state.open;
   const s = o.session;
@@ -898,6 +948,7 @@ function renderToday() {
   const c = setCounts(o.sets);
   const canSubmit = c.logged + c.skipped > 0;
   show(
+    finishStaleCard(),
     sessionHeader(o),
     groups.map((ex) => exerciseCard(ex, byEx[ex])),
     el('div', { class: 'formcard', style: 'border-style:dashed' },
