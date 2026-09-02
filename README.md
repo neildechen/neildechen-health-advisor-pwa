@@ -37,6 +37,24 @@ truth is the Claude Design project "Health Advisor — Logging UI".
 - `sw.js` — caches the shell only; cross-origin (API) requests are not intercepted.
 - `manifest.webmanifest` + `icons/` — installable, standalone, slate-blue `#3A66A0`.
 
+## Single-plan mode (2026-09-02)
+
+The client is data-driven: when `view=open` reports a rotation with one day (a
+tracker workbook seeded by gym-programmer `Tracker.gs`), `singlePlan()` hides the
+rotation line, softens Complete to "Finish workout", and describes blank sets quietly.
+A multi-day sheet renders exactly as before. Assisted loads (`-60` = 60 lb of
+assistance) round-trip verbatim like `+35` does; the stepper moves the magnitude.
+Two people on two sheets never share anything but this shell — each device stores
+its own endpoint + token, and every request goes only to that endpoint.
+
+## Tests
+
+`node tests/run.mjs` — headless Chromium (the globally installed `playwright`) against
+`tests/mock-backend.mjs`, an in-memory stand-in for the Apps Script API. Covers
+setup/bad token, single-plan render and copy, one-tap logging, typed and assisted
+loads, the finish flow, a four-day regression, two-device isolation, and repo hygiene
+(no deployment path in the tree, shell version consistent). Run it before every push.
+
 ## Dev loop
 
 Serve statically (`python3 -m http.server`) and iterate with headless-Chromium

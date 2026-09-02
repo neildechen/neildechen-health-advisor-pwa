@@ -1,4 +1,9 @@
 /* Health Advisor logging PWA — P5: optimistic writes (Instagram model).
+ * P6 (2026-09-02): single-plan mode — when the sheet's rotation has ONE day (a
+ * tracker workbook, gym-programmer Tracker.gs) the rotation line is hidden and the
+ * Complete copy softens to "Finish workout". Entirely data-driven from view=open;
+ * a multi-day sheet renders exactly as before. Assisted loads ("-60" = 60 lb of
+ * assistance) round-trip verbatim like "+35" does.
  * Set-level writes render as committed the moment they're tapped; the POST
  * reconciles in the background. Transient failures keep the optimistic state
  * (offline queue, as before); hard API rejections revert exactly the touched
@@ -414,6 +419,14 @@ function renderSetup(prefillError) {
 
 const state = { open: null, apiVersion: 0, undoDeployed: false };
 
+/** Single-plan mode: a one-day rotation has no "next day" worth showing. Purely a
+ *  read of the server payload — nothing is stored, nothing is configured. */
+function singlePlan() {
+  const r = state.open && state.open.rotation;
+  return !!r && (r.order || []).length <= 1;
+}
+function completeLabel() { return singlePlan() ? 'Finish workout ✓' : 'Complete Session ✓'; }
+
 function fmtDate(iso) {
   const d = new Date(iso + 'T12:00:00');
   return isNaN(d) ? iso : d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
@@ -435,7 +448,10 @@ function rxText(sets) {
     reps = s0.rx_reps_low === s0.rx_reps_high ? String(s0.rx_reps_low) : s0.rx_reps_low + '–' + s0.rx_reps_high;
   }
   const bits = [n + (reps ? '×' + reps : ' sets')];
-  if (s0.rx_load) bits.push(s0.rx_load + (/^\d/.test(s0.rx_load) || s0.rx_load.startsWith('+') ? ' lb' : ''));
+  if (s0.rx_load) {
+    bits.push(s0.rx_load + (s0.rx_load.startsWith('-') ? ' lb assist'
+      : (/^\d/.test(s0.rx_load) || s0.rx_load.startsWith('+') ? ' lb' : '')));
+  }
   return bits.join(' · ');
 }
 
@@ -449,7 +465,7 @@ function sessionHeader(o) {
       state.stale ? el('span', { class: 'stale', style: 'margin-left:.5rem;vertical-align:middle' }, 'offline · stale') : null),
     el('div', { class: 'meta' },
       fmtDate(s.date) + (r.last_session_date ? ' · last session ' + daysAgoText(r.last_session_date) : '')),
-    el('div', { class: 'rot' }, dots,
+    singlePlan() ? null : el('div', { class: 'rot' }, dots,
       el('em', {}, (r.position || '?') + ' of ' + (r.order || []).length + ' · next: ' + (r.next || '—'))),
     state.undoDeployed && rc ? el('div', { class: 'undoline' },
       'Submitted ' + rc.day + ' by mistake? ',
@@ -497,7 +513,7 @@ function tapChip(set, chipBtn, exName) {
 
 // ---- set editor (bottom sheet, screens/exercise-form card) ----------------------
 
-const LOAD_SHAPE = /^\+?\d+(\.\d+)?$/;
+const LOAD_SHAPE = /^[+-]?\d+(\.\d+)?$/; // "180", "+35" (added), "-60" (assistance)
 
 function openEditor(set, exName) {
   const o = state.open;
@@ -512,7 +528,9 @@ function openEditor(set, exName) {
     Number(set.rx_reps_high) || Number(set.rx_reps_low) || 0;
   // load state — text end-to-end; "+" preserved
   let load = set.actual_load || set.rx_load || '';
-  const numericLoad = LOAD_SHAPE.test(load);
+  // Single-plan sheets start with blank loads (the friend types her own on day one):
+  // give a blank load the stepper too, so the number is one tap away from typing.
+  const numericLoad = LOAD_SHAPE.test(load) || (singlePlan() && load === '');
 
   // The stepper number is itself an input: tap it to type, buttons still step.
   // Blur snaps reps back to the value Save will use, so a cleared/garbled field
@@ -523,16 +541,20 @@ function openEditor(set, exName) {
     oninput: (e) => { const n = parseInt(e.target.value, 10); reps = isFinite(n) && n > 0 ? n : 0; },
     onblur: (e) => { e.target.value = String(reps); } });
   const loadUnit = el('span', { class: 'u' });
-  const syncLoadUnit = () => { loadUnit.textContent = load.startsWith('+') ? 'lb added' : 'lb'; };
+  const syncLoadUnit = () => {
+    loadUnit.textContent = load.startsWith('+') ? 'lb added' : load.startsWith('-') ? 'lb assist' : 'lb';
+  };
   const loadOut = el('input', { class: 'stepval', type: 'text', inputmode: 'decimal',
     autocomplete: 'off', autocapitalize: 'none', value: load,
     onfocus: (e) => e.target.select(),
     oninput: (e) => { load = e.target.value.trim(); syncLoadUnit(); } });
   const bump = (d) => { reps = Math.max(0, reps + d); repsOut.value = String(reps); };
   const bumpLoad = (d) => {
-    const plusNow = load.startsWith('+'); // typing may add/drop the prefix — re-read it
-    const n = Math.max(0, (parseFloat(load.replace('+', '')) || 0) + d);
-    load = (plusNow ? '+' : '') + (Number.isInteger(n) ? n : n.toFixed(1));
+    // typing may add/drop the prefix — re-read it. The stepper moves the MAGNITUDE:
+    // "+35" -> "+40"; "-60" (assistance) -> "-65"; a "-" that reaches 0 drops the sign.
+    const sign = (load.match(/^[+-]/) || [''])[0];
+    const n = Math.max(0, (parseFloat(load.replace(/^[+-]/, '')) || 0) + d);
+    load = (n === 0 && sign === '-' ? '' : sign) + (Number.isInteger(n) ? n : n.toFixed(1));
     loadOut.value = load;
     syncLoadUnit();
   };
@@ -659,23 +681,28 @@ function saveNotes(text) {
 function confirmComplete(btn) {
   const o = state.open;
   const c = setCounts(o.sets);
-  const loud = c.blank > 0 && c.blank >= c.logged;
+  const simple = singlePlan();
+  // Single-plan sets are all optional by design: blanks close quietly, no red warning.
+  const loud = !simple && c.blank > 0 && c.blank >= c.logged;
   openSheet(
     el('div', { class: 'appbar', style: 'border-radius:10px' },
       el('div', {},
-        el('div', { class: 't' }, 'Complete this session?'),
+        el('div', { class: 't' }, simple ? 'Finish this workout?' : 'Complete this session?'),
         el('div', { class: 'sub' }, o.session.day_label + ' · ' + fmtDate(o.session.date)))),
     el('div', { class: 'formcard' },
-      el('div', { class: 'label' }, 'What gets submitted'),
+      el('div', { class: 'label' }, simple ? 'What gets saved' : 'What gets submitted'),
       el('div', { class: 'rxline' }, el('span', {}, 'Logged sets'), el('b', {}, c.logged + ' of ' + c.total)),
       c.skipped ? el('div', { class: 'rxline' }, el('span', {}, 'Skipped'), el('b', {}, String(c.skipped))) : null,
-      c.blank ? el('div', { class: 'err' },
-        (loud ? 'Heads up — most of this session is still blank. ' : '') +
-        c.blank + ' blank set' + (c.blank > 1 ? 's' : '') + ' will be marked "(skipped for time)".') : null,
+      c.blank ? el('div', { class: simple ? 'hint' : 'err' },
+        simple
+          ? c.blank + ' set' + (c.blank > 1 ? 's' : '') + ' left blank — that’s fine, ' + (c.blank > 1 ? 'they' : 'it') + ' will just be marked not done.'
+          : (loud ? 'Heads up — most of this session is still blank. ' : '') +
+            c.blank + ' blank set' + (c.blank > 1 ? 's' : '') + ' will be marked "(skipped for time)".') : null,
       el('div', { class: 'hint' },
-        'This closes today, advances the rotation, and loads ' + (o.rotation.next || 'the next day') + '.')),
+        simple ? 'This saves today’s workout and starts a fresh one for next time.'
+          : 'This closes today, advances the rotation, and loads ' + (o.rotation.next || 'the next day') + '.')),
     el('div', { class: 'formbtns' },
-      el('button', { class: 'primary', onclick: () => { closeSheet(); completeSession(btn); } }, 'Complete Session'),
+      el('button', { class: 'primary', onclick: () => { closeSheet(); completeSession(btn); } }, simple ? 'Finish workout' : 'Complete Session'),
       el('button', { class: 'ghostbtn', onclick: closeSheet }, 'Cancel')),
   );
 }
@@ -721,13 +748,13 @@ async function completeSession(btn) {
   setSub('Finishing…');
   try {
     const r = await write(Object.assign({ action: 'complete_v2' }, (verified && !logged) ? { allowEmpty: true } : {}));
-    if (!r.ok && r.reason === 'empty') { toast(r.message); btn.disabled = false; btn.textContent = 'Complete Session ✓'; return; }
+    if (!r.ok && r.reason === 'empty') { toast(r.message); btn.disabled = false; btn.textContent = completeLabel(); return; }
     if (!r.ok) throw new Error(r.error || 'complete failed');
     if (r.queued) { toast('Completion queued — will finish when back online.'); setSub('Offline'); return; }
   } catch (e) {
     if (!e.nonJson) {
       toast('Complete failed: ' + e.message);
-      btn.disabled = false; btn.textContent = 'Complete Session ✓';
+      btn.disabled = false; btn.textContent = completeLabel();
       setSub('Active session');
       return;
     } // non-JSON: the request very likely landed — fall through to polling
@@ -743,11 +770,12 @@ async function completeSession(btn) {
         try { localStorage.setItem(LS.lastComplete, JSON.stringify({ id: prevId, day: prevDay, ts: Date.now() })); }
         catch (_) { /* quota: the post-submit snackbar still offers Undo */ }
         renderToday();
+        const msg = singlePlan() ? 'Workout saved — a fresh one is ready for next time.'
+          : 'Session complete — next up: ' + r.open.session.day_label;
         if (state.undoDeployed) {
-          toast('Session complete — next up: ' + r.open.session.day_label,
-            { action: 'Undo', onAction: () => startUndo(false, 0), ms: 15000 });
+          toast(msg, { action: 'Undo', onAction: () => startUndo(false, 0), ms: 15000 });
         } else {
-          toast('Session complete — next up: ' + r.open.session.day_label);
+          toast(msg);
         }
         return;
       }
@@ -920,9 +948,10 @@ function finishStaleCard() {
     el('div', { class: 'day' }, 'Finish ' + o.session.day_label + '?'),
     el('div', { class: 'meta' },
       c.logged + ' of ' + c.total + ' sets logged, last ' + when +
-      ' — completing loads ' + (o.rotation.next || 'the next day') + '.'),
+      (singlePlan() ? ' — finishing saves it and starts a fresh one.'
+        : ' — completing loads ' + (o.rotation.next || 'the next day') + '.')),
     el('button', { class: 'fabbtn', onclick: (e) => confirmComplete(e.target) },
-      'Finish & load ' + (o.rotation.next || 'next day')));
+      singlePlan() ? 'Finish & start fresh' : 'Finish & load ' + (o.rotation.next || 'next day')));
 }
 
 function renderToday() {
@@ -957,9 +986,9 @@ function renderToday() {
         onchange: (e) => saveNotes(e.target.value) },
         s.session_notes || '')),
     el('button', { class: 'fabbtn', disabled: !canSubmit,
-      onclick: (e) => confirmComplete(e.target) }, 'Complete Session ✓'),
+      onclick: (e) => confirmComplete(e.target) }, completeLabel()),
     canSubmit ? null : el('div', { class: 'hint', style: 'text-align:center' },
-      'Log or skip at least one set to enable submitting.'),
+      singlePlan() ? 'Log at least one set to finish the workout.' : 'Log or skip at least one set to enable submitting.'),
   );
 }
 
