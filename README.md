@@ -41,7 +41,10 @@ truth is the Claude Design project "Health Advisor — Logging UI".
 
 The client is data-driven: when `view=open` reports a rotation with one day (a
 tracker workbook seeded by gym-programmer `Tracker.gs`), `singlePlan()` hides the
-rotation line, softens Complete to "Finish workout", and describes blank sets quietly.
+rotation line, softens Complete to "Finish workout", describes blank sets quietly, and
+switches the scheme to baby pink (`body.plan-single` in `app.css`, theme-color meta
+follows). A recommended-set count below the loggable count (`exercises[ex].rec_sets`)
+renders "3×8–10 · +1 optional"; `exercises[ex].optional = Y` adds an Optional badge.
 A multi-day sheet renders exactly as before. Assisted loads (`-60` = 60 lb of
 assistance) round-trip verbatim like `+35` does; the stepper moves the magnitude.
 Two people on two sheets never share anything but this shell — each device stores

@@ -426,6 +426,14 @@ function singlePlan() {
   return !!r && (r.order || []).length <= 1;
 }
 function completeLabel() { return singlePlan() ? 'Finish workout ✓' : 'Complete Session ✓'; }
+/** Single-plan sheets wear the pink scheme (app.css body.plan-single); the theme-color
+ *  meta follows so the iOS status bar matches. A multi-day sheet stays slate blue. */
+function applyScheme() {
+  const single = singlePlan();
+  document.body.classList.toggle('plan-single', single);
+  const m = document.querySelector('meta[name=theme-color]');
+  if (m) m.setAttribute('content', single ? '#F4A6BF' : '#3A66A0');
+}
 
 function fmtDate(iso) {
   const d = new Date(iso + 'T12:00:00');
@@ -439,15 +447,19 @@ function daysAgoText(iso) {
   if (n === 1) return 'yesterday';
   return n + ' days ago';
 }
-/** "3×6–8 · 165 lb" (parts drop out when the program leaves them blank). */
-function rxText(sets) {
+/** "3×6–8 · 165 lb" (parts drop out when the program leaves them blank). With a
+ *  recommended-set count below the loggable count (tracker "rec:3" on 4 chips):
+ *  "3×8–10 · +1 optional". */
+function rxText(sets, meta) {
   const s0 = sets[0];
   const n = sets.length;
   let reps = '';
   if (s0.rx_reps_low !== '' && s0.rx_reps_high !== '') {
     reps = s0.rx_reps_low === s0.rx_reps_high ? String(s0.rx_reps_low) : s0.rx_reps_low + '–' + s0.rx_reps_high;
   }
-  const bits = [n + (reps ? '×' + reps : ' sets')];
+  const rec = meta && Number(meta.rec_sets) > 0 && Number(meta.rec_sets) < n ? Number(meta.rec_sets) : 0;
+  const bits = [(rec || n) + (reps ? '×' + reps : ' sets')];
+  if (rec) bits.push('+' + (n - rec) + ' optional');
   if (s0.rx_load) {
     bits.push(s0.rx_load + (s0.rx_load.startsWith('-') ? ' lb assist'
       : (/^\d/.test(s0.rx_load) || s0.rx_load.startsWith('+') ? ' lb' : '')));
@@ -594,7 +606,9 @@ function openEditor(set, exName) {
     el('div', { class: 'formcard' },
       el('div', { class: 'label' }, 'Prescribed'),
       el('div', { class: 'rxline' },
-        el('span', {}, exSets.length + ' sets' + (rxRange ? ' × ' + rxRange + ' reps' : '')),
+        el('span', {}, (Number(meta.rec_sets) > 0 && Number(meta.rec_sets) < exSets.length
+          ? meta.rec_sets + ' sets (up to ' + exSets.length + ')' : exSets.length + ' sets')
+          + (rxRange ? ' × ' + rxRange + ' reps' : '')),
         el('b', {}, set.rx_load || '—')),
       ghost ? el('div', { class: 'lastline' }, 'Last session: ',
         el('b', {}, (ghost.load ? ghost.load + ' × ' : '') + ghost.reps.join(',')), hint) : (hint ? el('div', { class: 'lastline' }, hint.slice(3)) : null)),
@@ -901,11 +915,12 @@ function exerciseCard(exName, sets) {
   const badges = [];
   if (String(meta.core).toUpperCase() === 'Y') badges.push(el('span', { class: 'badge' }, 'Core'));
   if (/cuban|cuff/i.test(exName)) badges.push(el('span', { class: 'badge' }, 'Cuff'));
+  if (String(meta.optional).toUpperCase() === 'Y') badges.push(el('span', { class: 'badge opt' }, 'Optional'));
 
   return el('article', { class: 'ex' + (allSkipped ? ' skipped' : '') },
     el('div', { class: 'row1' },
       el('span', { class: 'name' }, exName), badges,
-      el('span', { class: 'rx' }, rxText(sets))),
+      el('span', { class: 'rx' }, rxText(sets, meta))),
     ghost ? el('div', { class: 'ghost' }, 'Last (' + state.open.session.day_label + '): ',
       el('b', {}, (ghost.load ? ghost.load + ' × ' : '') + ghost.reps.join(','))) : null,
     el('div', { class: 'sets' }, sets.map((s) => chip(s, exName))),
@@ -957,6 +972,7 @@ function finishStaleCard() {
 function renderToday() {
   const o = state.open;
   const s = o.session;
+  applyScheme();
   if (!s) {
     setSub('No open session');
     show(el('div', { class: 'sessioncard' },

@@ -111,6 +111,17 @@ button.setchip{cursor:pointer}
   background:transparent;color:var(--ink);text-align:center;
   font:600 16px/1.35 system-ui;font-variant-numeric:tabular-nums}
 .setrow .stepper input.stepval:focus{outline:none;background:var(--accent-soft)}
+/* single-plan (tracker) scheme — baby pink; toggled by app.js applyScheme() when the
+   sheet's rotation has one day. Dark ink on the pink bar keeps the appbar readable. */
+body.plan-single{
+  --accent:#F4A6BF; --accent-ink:#4A2430; --accent-soft:#FDE8EF; --phone-bg:#FCF3F6;
+  --card-line:#F1D5DE; --line:#E9C9D4;
+}
+body.plan-single .fabbtn{box-shadow:0 8px 20px rgba(200,110,140,.35)}
+body.plan-single .qbadge{background:rgba(74,36,48,.12);border-color:rgba(74,36,48,.35)}
+body.plan-single .toastbar .tact{color:#F4A6BF}
+.badge.opt{background:var(--accent-soft);color:var(--accent-ink)}
+body:not(.plan-single) .badge.opt{color:var(--accent)}
 /* finish-yesterday card (deferred-Complete ritual) */
 .staleopen{border-color:var(--accent);background:var(--accent-soft)}
 .staleopen .fabbtn{margin-top:.65rem;padding:.7rem;box-shadow:none}

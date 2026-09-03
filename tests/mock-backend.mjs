@@ -8,12 +8,14 @@
  * booleans are "TRUE"/"FALSE", reps numbers become strings, loads stay verbatim.
  */
 
+// name, loggable sets, reps low, reps high, rx load, load type, [rec_sets, optional]
 const TRACKER_PROGRAM = [
-  ['Romanian Deadlift', 4, 8, 10, '', 'barbell'],
-  ['Bulgarian Split Squat', 4, 8, 10, '', 'dumbbell'],
-  ['Bench Press', 4, 4, 6, '', 'barbell'],
-  ['Assisted Pull-up', 4, 4, 6, '', 'assisted'],
-  ['Hanging Leg Raise', 4, 10, 15, 'BW', 'bodyweight'],
+  ['Seated Cable RDL', 4, 8, 10, '', 'machine', '3', ''],
+  ['Bulgarian Split Squat', 4, 6, 8, '', 'dumbbell', '3', ''],
+  ['Glute Hip Thrust', 4, 8, 10, '', 'barbell', '3', 'Y'],
+  ['Bench Press', 4, 4, 5, '', 'barbell', '3', ''],
+  ['Lat Pulldown', 4, 8, 10, '', 'machine', '3', ''],
+  ['Hanging Leg Raise', 4, 10, 15, 'BW', 'bodyweight', '3', ''],
 ];
 const FOUR_DAY = {
   order: ['Upper A', 'Lower - Squat', 'Upper B', 'Lower - Hinge'],
@@ -60,7 +62,7 @@ export function makeBackend(kind, opts = {}) {
   const open = () => sessions.find((s) => s.status !== 'complete') || null;
   function exercisesMeta(day) {
     const m = {};
-    programs[day].forEach((ex) => { m[ex[0]] = { core: '', increment: ex[5] === 'bodyweight' ? '' : (ex[5] === 'added' ? '2.5' : '5'), rest: '2 min', progression: 'double progression', notes: '' }; });
+    programs[day].forEach((ex) => { m[ex[0]] = { core: '', increment: ex[5] === 'bodyweight' ? '' : (ex[5] === 'added' ? '2.5' : '5'), rest: '2 min', progression: 'double progression', notes: '', rec_sets: ex[6] || '', optional: ex[7] || '' }; });
     return m;
   }
   function ghosts(sess) {

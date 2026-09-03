@@ -87,37 +87,45 @@ const chipsOf = (page, exName) => page.locator('article.ex', { has: page.locator
 
   // 2. single-plan render
   const names = await page.locator('article.ex .name').allTextContents();
-  check('five exercise cards in program order', JSON.stringify(names) === JSON.stringify(['Romanian Deadlift', 'Bulgarian Split Squat', 'Bench Press', 'Assisted Pull-up', 'Hanging Leg Raise']), JSON.stringify(names));
+  check('six exercise cards in program order', JSON.stringify(names) === JSON.stringify(['Seated Cable RDL', 'Bulgarian Split Squat', 'Glute Hip Thrust', 'Bench Press', 'Lat Pulldown', 'Hanging Leg Raise']), JSON.stringify(names));
   const rx = await page.locator('article.ex .rx').allTextContents();
-  check('rx lines: 4 sets, 8–10 / 8–10 / 4–6 / 4–6 / 10–15 BW', JSON.stringify(rx) === JSON.stringify(['4×8–10', '4×8–10', '4×4–6', '4×4–6', '4×10–15 · BW']), JSON.stringify(rx));
-  check('four chips per exercise', await page.locator('button.setchip').count() === 20);
+  check('rx lines: 3 recommended + 1 optional; 8–10 / 6–8 / 8–10 / 4–5 / 8–10 / 10–15 BW',
+    JSON.stringify(rx) === JSON.stringify(['3×8–10 · +1 optional', '3×6–8 · +1 optional', '3×8–10 · +1 optional', '3×4–5 · +1 optional', '3×8–10 · +1 optional', '3×10–15 · +1 optional · BW']), JSON.stringify(rx));
+  check('four loggable chips per exercise (24)', await page.locator('button.setchip').count() === 24);
+  check('hip thrust carries the Optional badge, nothing else does', await page.locator('.badge.opt').count() === 1
+    && /Glute Hip Thrust/.test(await page.locator('article.ex', { has: page.locator('.badge.opt') }).locator('.name').textContent()));
+  const accent = await page.evaluate(() => getComputedStyle(document.querySelector('.appbar')).backgroundColor);
+  check('single-plan wears the baby pink scheme (appbar #F4A6BF)', accent === 'rgb(244, 166, 191)' && await page.evaluate(() => document.body.classList.contains('plan-single')), accent);
+  check('theme-color meta follows the scheme', (await page.getAttribute('meta[name=theme-color]', 'content')) === '#F4A6BF');
   check('no rotation dots / next-day line in single-plan mode', await page.locator('.rot').count() === 0);
   check('header shows the day without an emphasis suffix', (await text(page, '.sessioncard .day')).trim() === 'Full Body');
-  check('no Core badges (tracker notes carry no CORE prefix)', await page.locator('.badge').count() === 0);
+  check('no Core badges (tracker notes carry no CORE prefix)', await page.locator('.badge:not(.opt)').count() === 0);
   const btn = page.locator('main > button.fabbtn');
   check('primary button reads "Finish workout ✓"', (await btn.textContent()) === 'Finish workout ✓');
   check('finish is inert until something is logged', await btn.isDisabled());
   check('single-plan hint copy', /Log at least one set to finish/.test(await text(page, 'main .hint')));
 
   // 3. one-tap chip logs rx_reps_high
-  await chipsOf(page, 'Romanian Deadlift').nth(0).click();
+  await chipsOf(page, 'Seated Cable RDL').nth(0).click();
   await sleep(150);
   let ls = A.calls.filter((c) => c.body && c.body.action === 'log_set');
   check('one tap on RDL logs 10 reps (top of 8–10)', ls.length === 1 && ls[0].body.actual_reps === 10 && ls[0].body.set_id.endsWith('#1#1'), JSON.stringify(ls.map((c) => c.body)));
   await chipsOf(page, 'Bench Press').nth(0).click();
   await chipsOf(page, 'Hanging Leg Raise').nth(0).click();
+  await chipsOf(page, 'Bulgarian Split Squat').nth(0).click();
   await sleep(150);
   ls = A.calls.filter((c) => c.body && c.body.action === 'log_set');
-  check('bench tap logs 6, hanging leg raise tap logs 15', ls.length === 3 && ls[1].body.actual_reps === 6 && ls[2].body.actual_reps === 15);
-  check('tapped chips render filled', await page.locator('button.setchip.filled').count() === 3);
+  check('bench tap logs 5, hanging leg raise 15, Bulgarian 8', ls.length === 4 && ls[1].body.actual_reps === 5 && ls[2].body.actual_reps === 15 && ls[3].body.actual_reps === 8);
+  check('tapped chips render filled', await page.locator('button.setchip.filled').count() === 4);
   check('finish enabled after one logged set', !(await btn.isDisabled()));
 
   // 4. editor: blank load gets a stepper; typed load round-trips; assisted "-" notation
-  await chipsOf(page, 'Bench Press').nth(1).click(); // empty chip -> logs 6 optimistically (top of range)
+  await chipsOf(page, 'Bench Press').nth(1).click(); // empty chip -> logs 5 optimistically (top of range)
   await sleep(100);
   await chipsOf(page, 'Bench Press').nth(1).click(); // filled chip -> editor
   await page.waitForSelector('.sheet');
   check('editor titles the exercise and set', /Bench Press/.test(await text(page, '.sheet .t')) && /set 2 of 4/.test(await text(page, '.sheet .sub')));
+  check('editor prescribes "3 sets (up to 4) × 4–5 reps"', /3 sets \(up to 4\) × 4–5 reps/.test(await page.locator('.sheet .rxline').first().textContent()));
   check('blank load still gets the numeric stepper in single-plan mode', await page.locator('.sheet .stepper input.stepval').count() === 2);
   const loadIn = page.locator('.sheet .stepper input.stepval').nth(1);
   await loadIn.fill('95');
@@ -125,16 +133,16 @@ const chipsOf = (page, exName) => page.locator('article.ex', { has: page.locator
   await sleep(150);
   ls = A.calls.filter((c) => c.body && c.body.action === 'log_set');
   const last = ls[ls.length - 1].body;
-  check('typed load "95" reaches log_set verbatim with the reps', last.actual_load === '95' && last.actual_reps === 6, JSON.stringify(last));
+  check('typed load "95" reaches log_set verbatim with the reps', last.actual_load === '95' && last.actual_reps === 5, JSON.stringify(last));
   check('save auto-advances to the next unlogged bench set', /set 3 of 4/.test(await text(page, '.sheet .sub')));
   await page.click('.sheet .formbtns .ghostbtn'); // Skip set 3 (closes; auto-advance only on reps)
   await sleep(100);
   await page.locator('.sheetwrap').count() && await page.mouse.click(10, 10);
   await sleep(100);
 
-  await chipsOf(page, 'Assisted Pull-up').nth(0).click(); // logs 6
+  await chipsOf(page, 'Lat Pulldown').nth(0).click(); // logs 10
   await sleep(100);
-  await chipsOf(page, 'Assisted Pull-up').nth(0).click(); // editor
+  await chipsOf(page, 'Lat Pulldown').nth(0).click(); // editor
   await page.waitForSelector('.sheet');
   const apLoad = page.locator('.sheet .stepper input.stepval').nth(1);
   await apLoad.fill('-60');
@@ -148,7 +156,7 @@ const chipsOf = (page, exName) => page.locator('article.ex', { has: page.locator
   check('assisted load "-65" reaches log_set verbatim', ls[ls.length - 1].body.actual_load === '-65', JSON.stringify(ls[ls.length - 1].body));
   await page.locator('.sheetwrap').count() && await page.mouse.click(10, 10);
   await sleep(100);
-  const apGhostLoad = A.sessions[0].sets.find((s) => s.exercise === 'Assisted Pull-up' && s.set_no === '1').actual_load;
+  const apGhostLoad = A.sessions[0].sets.find((s) => s.exercise === 'Lat Pulldown' && s.set_no === '1').actual_load;
   check('mock sheet holds "-65" for the assisted set', apGhostLoad === '-65');
 
   // 5. finish flow: soft copy, quiet blanks, same day again, ghosts carried
@@ -162,10 +170,10 @@ const chipsOf = (page, exName) => page.locator('article.ex', { has: page.locator
   await page.waitForFunction((id) => !document.body.textContent.includes('Loading') && document.querySelectorAll('button.setchip.filled').length === 0, firstId, { timeout: 10000 });
   check('complete_v2 was posted exactly once', A.calls.filter((c) => c.body && c.body.action === 'complete_v2').length === 1);
   check('the mock rolled to a NEW session on the same day', A.sessions.length === 2 && A.sessions[1].day_label === 'Full Body' && A.sessions[1].session_id !== firstId);
-  check('all twenty chips are empty again', await page.locator('button.setchip').count() === 20 && await page.locator('button.setchip.filled').count() === 0);
+  check('all 24 chips are empty again', await page.locator('button.setchip').count() === 24 && await page.locator('button.setchip.filled').count() === 0);
   const toastText = await text(page, '#toast');
   check('toast says the workout was saved (no "next up")', /Workout saved/.test(toastText) && !/next up/.test(toastText), toastText);
-  const ghostRdl = await page.locator('article.ex', { has: page.locator('.name', { hasText: 'Romanian Deadlift' }) }).locator('.ghost').textContent();
+  const ghostRdl = await page.locator('article.ex', { has: page.locator('.name', { hasText: 'Seated Cable RDL' }) }).locator('.ghost').textContent();
   check('last-time ghost shows after the first workout', /Last \(Full Body\)/.test(ghostRdl) && /10/.test(ghostRdl), ghostRdl);
   check('blank bench sets were closed as "(skipped for time)" server-side', A.sessions[0].sets.filter((s) => s.exercise === 'Bench Press' && s.comment === '(skipped for time)').length === 1);
 
@@ -194,6 +202,9 @@ const chipsOf = (page, exName) => page.locator('article.ex', { has: page.locator
   check('[4-day] rx line keeps the lb unit and "+35"', JSON.stringify(await page.locator('article.ex .rx').allTextContents()) === JSON.stringify(['4×4–6 · 180 lb', '4×4–6 · +35 lb', '2×15–20 · 10 lb']));
   const btn = page.locator('main > button.fabbtn');
   check('[4-day] button still reads "Complete Session ✓"', (await btn.textContent()) === 'Complete Session ✓');
+  const blue = await page.evaluate(() => getComputedStyle(document.querySelector('.appbar')).backgroundColor);
+  check('[4-day] keeps the slate-blue scheme (#3A66A0) and no plan-single class', blue === 'rgb(58, 102, 160)' && !(await page.evaluate(() => document.body.classList.contains('plan-single'))), blue);
+  check('[4-day] no Optional badges', await page.locator('.badge.opt').count() === 0);
   check('[4-day] original submit hint', /Log or skip at least one set to enable submitting/.test(await text(page, 'main .hint')));
   await chipsOf(page, 'Weighted Pull-up').nth(0).click();
   await sleep(100);
@@ -229,12 +240,12 @@ const chipsOf = (page, exName) => page.locator('article.ex', { has: page.locator
   await connect(dev2.page, EXEC_B, 'tok-B');
   await dev1.page.waitForSelector('article.ex');
   await dev2.page.waitForSelector('article.ex');
-  await chipsOf(dev1.page, 'Romanian Deadlift').nth(0).click();
+  await chipsOf(dev1.page, 'Seated Cable RDL').nth(0).click();
   await chipsOf(dev2.page, 'Bench Press').nth(0).click();
   await sleep(200);
   check('[2 devices] the tracker device only ever called endpoint A with token A', A.calls.every((c) => c.token === 'tok-A' && c.url.startsWith(EXEC_A)) && !A.calls.some((c) => c.token === 'tok-B'));
   check('[2 devices] the four-day device only ever called endpoint B with token B', B.calls.every((c) => c.token === 'tok-B' && c.url.startsWith(EXEC_B)) && !B.calls.some((c) => c.token === 'tok-A'));
-  check('[2 devices] a tap on one device never lands in the other sheet', A.sessions[0].sets.filter((s) => s.actual_reps !== '').length === 1 && A.sessions[0].sets[0].exercise === 'Romanian Deadlift'
+  check('[2 devices] a tap on one device never lands in the other sheet', A.sessions[0].sets.filter((s) => s.actual_reps !== '').length === 1 && A.sessions[0].sets[0].exercise === 'Seated Cable RDL'
     && B.sessions[0].sets.filter((s) => s.actual_reps !== '').length === 1 && B.sessions[0].sets[0].exercise === 'Bench Press');
   check('[2 devices] each device sees its own plan', await dev1.page.locator('.rot').count() === 0 && await dev2.page.locator('.rot').count() === 1);
   await dev1.ctx.close(); await dev2.ctx.close();
